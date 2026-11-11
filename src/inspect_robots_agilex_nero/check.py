@@ -100,12 +100,28 @@ def assess_groups(robot: Any, stale_s: float) -> list[Check]:
 
 
 def assess_readings(robot: Any, stale_s: float) -> list[Check]:
-    """The combined joint and pose readings, and whether the adapter accepts them."""
+    """The combined joint and pose readings, and whether the adapter accepts them.
+
+    Accepted means what hold() and the embodiment require: fresh, plus seven
+    finite joint angles and a finite six-value pose.
+    """
     driver = PyAgxArmDriver(robot, stale_s=stale_s)
     checks = []
+
+    def joints() -> None:
+        q = driver.read_joints()
+        if q.shape != (7,) or not np.all(np.isfinite(q)):
+            raise RuntimeError(f"not 7 finite joint angles: {q!r}")
+
+    def pose() -> None:
+        flange = driver.read_flange()
+        parts = (np.asarray(flange.position), np.asarray(flange.rpy))
+        if any(part.shape != (3,) or not np.all(np.isfinite(part)) for part in parts):
+            raise RuntimeError(f"not a finite 6-value pose: {flange!r}")
+
     for name, getter, read in (
-        ("joint angles", "get_joint_angles", driver.read_joints),
-        ("flange pose", "get_flange_pose", driver.read_flange),
+        ("joint angles", "get_joint_angles", joints),
+        ("flange pose", "get_flange_pose", pose),
     ):
         try:
             reply = getattr(robot, getter)()

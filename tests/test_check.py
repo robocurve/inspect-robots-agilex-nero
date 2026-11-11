@@ -76,6 +76,17 @@ def test_a_renamed_or_missing_cache_explains_the_e_stop_risk() -> None:
             "not a usable time",
         ),
         (lambda r: setattr(r, "joints", message([0.1] * 7, hz=0.0)), "joint angles", "refuses"),
+        (lambda r: setattr(r, "joints", message([0.1] * 6, hz=200.0)), "joint angles", "not 7"),
+        (
+            lambda r: setattr(r, "joints", message([0.1] * 6 + [np.nan], hz=200.0)),
+            "joint angles",
+            "not 7 finite",
+        ),
+        (
+            lambda r: setattr(r, "pose", message([0.3, 0.0, np.inf, 3.1, 0.0, 0.0], hz=200.0)),
+            "flange pose",
+            "not a finite",
+        ),
     ],
 )
 def test_each_problem_is_named(change: Any, name: str, text: str) -> None:
