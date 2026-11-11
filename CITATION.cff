@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Inspect Robots AgileX Nero: an embodiment for a Nero arm with an Inspire RH56 hand"
+authors:
+  - name: "Robocurve"
+type: software
+license: MIT
+repository-code: "https://github.com/robocurve/inspect-robots-agilex-nero"
+version: "0.1.0"

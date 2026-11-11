@@ -100,3 +100,18 @@ def test_entry_point_and_public_api() -> None:
     assert isinstance(emb, NeroEmbodiment)
     assert np.asarray(emb.info.action_space.high)[0] == pytest.approx(0.01)
     assert "NeroEmbodiment" in package.__all__
+
+
+def test_runtime_requirements_and_device_slots() -> None:
+    from inspect_robots.conformance import device_slots, missing_runtime_requirements
+
+    assert set(NeroEmbodiment.RUNTIME_REQUIREMENTS) == {"pyAgxArm", "serial", "cv2"}
+    assert (
+        "git+https://github.com/agilexrobotics/pyAgxArm"
+        in (NeroEmbodiment.RUNTIME_REQUIREMENTS["pyAgxArm"])
+    )
+    assert "pyAgxArm" in missing_runtime_requirements(NeroEmbodiment)
+    slots = {slot.arg: slot.kind for slot in device_slots(NeroEmbodiment)}
+    assert slots == {"can_channel": "can", "hand_port": "serial", "camera_device": "v4l2"}
+    fields = set(NeroConfig.__dataclass_fields__)
+    assert set(slots) <= fields

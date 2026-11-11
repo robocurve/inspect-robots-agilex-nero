@@ -28,6 +28,13 @@ motors.
 - A failing step holds the arm, then closes.
 - `close()` holds, then closes every connection, and never disables motors.
 
+## CI and releases
+
+- CI installs from `uv.lock`; `ci-ok` needs every blocking job, including
+  import hygiene (the package imports with only inspect-robots and numpy).
+- Versions come from git tags through hatch-vcs. Design notes live in
+  `plans/` (`0001-nero-inspire-design.md`).
+
 ## Writing style
 
 - No em dashes in prose. No decorative emoji. Plain headers.

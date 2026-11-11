@@ -135,7 +135,8 @@ inspect-robots run --policy agent --embodiment nero_inspire \
 
 ```bash
 export UV_CACHE_DIR=$PWD/.uv-cache
-uv venv && uv pip install -e ".[dev]"
+uv sync --locked --extra dev
+uv run pre-commit install    # lint, format and types on commit; tests on push
 .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest --cov
 ```
 

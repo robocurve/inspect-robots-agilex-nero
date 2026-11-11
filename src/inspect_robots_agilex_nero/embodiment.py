@@ -19,12 +19,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 import numpy.typing as npt
+from inspect_robots.conformance import DeviceSlot
 from inspect_robots.embodiment import SELF_PACED, EmbodimentInfo, HealthCheck, HealthReport
 from inspect_robots.scene import Scene
 from inspect_robots.types import Action, Observation, StepResult
 
 from inspect_robots_agilex_nero.config import FINGERS_KEY, HAND_KEY, JOINTS_KEY, NeroConfig
 from inspect_robots_agilex_nero.nero import (
+    PYAGXARM_INSTALL,
     BackendFactory,
     Backends,
     FlangePose,
@@ -70,7 +72,17 @@ class NeroEmbodiment:
         "The Nero will move its hand to the home position and open the fingers. "
         "Clear the table around it, keep the stop within reach, then press Enter..."
     )
-    RUNTIME_REQUIREMENTS: ClassVar[Mapping[str, str]] = {}
+    # What the real arm, hand and camera need (simulator backends need their own).
+    RUNTIME_REQUIREMENTS: ClassVar[Mapping[str, str]] = {
+        "pyAgxArm": PYAGXARM_INSTALL,
+        "serial": 'pip install "inspect-robots-agilex-nero[hardware]"',
+        "cv2": 'pip install "inspect-robots-agilex-nero[hardware]"',
+    }
+    DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+        DeviceSlot(arg="can_channel", kind="can", label="Nero arm CAN channel"),
+        DeviceSlot(arg="hand_port", kind="serial", label="Inspire hand RS485 adapter"),
+        DeviceSlot(arg="camera_device", kind="v4l2", label="station camera"),
+    )
 
     def __init__(
         self,
