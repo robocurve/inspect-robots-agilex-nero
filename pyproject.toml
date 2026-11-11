@@ -79,7 +79,7 @@ strict = true
 files = ["src/inspect_robots_agilex_nero"]
 
 [[tool.mypy.overrides]]
-module = ["pyAgxArm", "pyAgxArm.*", "serial", "serial.*", "cv2", "cv2.*", "mujoco", "mujoco.*"]
+module = ["pyAgxArm", "pyAgxArm.*", "serial", "serial.*", "cv2", "cv2.*", "mujoco", "mujoco.*", "isaaclab", "isaaclab.*", "torch", "torch.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -91,7 +91,7 @@ pythonpath = ["tests"]
 [tool.coverage.run]
 branch = true
 # Needs MuJoCo and the vendor models; verified by running, not unit tested.
-omit = ["*/_mujoco.py"]
+omit = ["*/_mujoco.py", "*/_isaaclab.py"]
 source = ["inspect_robots_agilex_nero"]
 
 [tool.coverage.report]

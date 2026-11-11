@@ -27,48 +27,23 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-HAND_URDF = "robots/g1_description/g1_29dof_rev_1_0_with_inspire_hand_DFQ.urdf"
-#: Guessed mount: 3 cm out from the flange, hand fingers along flange +z.
-MOUNT_XYZ = "0 0 0.03"
-MOUNT_RPY = "-1.5707963 0 0"
-#: Grasp point in the hand base frame, measured from where the fingers and
-#: thumb close: in front of the palm (-x), level with the middle finger
-#: joints (-y, fingers extend along -y) and centred across the palm (z).
-GRASP_IN_HAND = (-0.025, -0.125, -0.01)
-
-#: (control name, driving joint) for the six Inspire motors.
-FINGER_JOINTS = (
-    ("little_finger", "R_pinky_proximal_joint"),
-    ("ring_finger", "R_ring_proximal_joint"),
-    ("middle_finger", "R_middle_proximal_joint"),
-    ("index_finger", "R_index_proximal_joint"),
-    ("thumb_bend", "R_thumb_proximal_pitch_joint"),
-    ("thumb_rotate", "R_thumb_proximal_yaw_joint"),
+from inspect_robots_agilex_nero.sim_layout import (
+    BLOCKS,
+    CAMERA_EYE,
+    CAMERA_FOVY_DEG,
+    CAMERA_NAME,
+    FINGER_JOINTS,
+    GRASP_IN_HAND,
+    camera_axes,
+    combined_urdf,
+    mimic_pairs,
 )
 
 
-def combined_urdf(agx: Path, unitree: Path) -> ET.Element:
-    """The Nero URDF with the right Inspire hand fixed to link7."""
-    nero = ET.parse(agx / "nero/urdf/nero_description.urdf").getroot()
-    for mesh in nero.iter("mesh"):
-        name = Path(mesh.get("filename", "")).name.replace(".dae", ".stl")
-        mesh.set("filename", str((agx / "nero/meshes" / name).resolve()))
-    hand_root = ET.parse(unitree / HAND_URDF).getroot()
-    mesh_dir = (unitree / "robots/g1_description").resolve()
-    for link in hand_root.findall("link"):
-        if link.get("name", "").startswith("R_"):
-            for mesh in link.iter("mesh"):
-                mesh.set("filename", str(mesh_dir / mesh.get("filename", "")))
-            nero.append(link)
-    for joint in hand_root.findall("joint"):
-        name = joint.get("name", "")
-        if name.startswith("R_") and name != "R_base_link_joint":
-            nero.append(joint)
-    mount = ET.SubElement(nero, "joint", name="hand_mount", type="fixed")
-    ET.SubElement(mount, "parent", link="link7")
-    ET.SubElement(mount, "child", link="R_hand_base_link")
-    ET.SubElement(mount, "origin", xyz=MOUNT_XYZ, rpy=MOUNT_RPY)
-    extension = ET.SubElement(nero, "mujoco")
+def mujoco_urdf(agx: Path, unitree: Path) -> ET.Element:
+    """The shared combined URDF plus MuJoCo's compiler settings."""
+    root = combined_urdf(agx, unitree)
+    extension = ET.SubElement(root, "mujoco")
     ET.SubElement(
         extension,
         "compiler",
@@ -77,20 +52,7 @@ def combined_urdf(agx: Path, unitree: Path) -> ET.Element:
         fusestatic="false",
         strippath="false",
     )
-    return nero
-
-
-def mimic_pairs(unitree: Path) -> list[tuple[str, str, float]]:
-    """(follower, leader, multiplier) for the hand's coupled joints."""
-    root = ET.parse(unitree / HAND_URDF).getroot()
-    pairs = []
-    for joint in root.findall("joint"):
-        mimic = joint.find("mimic")
-        if joint.get("name", "").startswith("R_") and mimic is not None:
-            pairs.append(
-                (joint.get("name", ""), mimic.get("joint", ""), float(mimic.get("multiplier", "1")))
-            )
-    return pairs
+    return root
 
 
 def decorate(mjcf: Path, unitree: Path) -> None:
@@ -136,48 +98,33 @@ def decorate(mjcf: Path, unitree: Path) -> None:
         contype="1",
         conaffinity="3",
     )
-    objects = (
-        ("red_block", "box", "0.02 0.02 0.02", "0.52 -0.06 0.02", "0.85 0.15 0.12 1"),
-        ("blue_block", "box", "0.025 0.025 0.025", "0.48 0.20 0.025", "0.15 0.3 0.85 1"),
-    )
-    for name, kind, size, pos, rgba in objects:
-        body = ET.SubElement(world, "body", name=name, pos=pos)
+    for block in BLOCKS:
+        body = ET.SubElement(world, "body", name=block.name, pos=" ".join(map(str, block.pos)))
         ET.SubElement(body, "freejoint")
         ET.SubElement(
             body,
             "geom",
-            type=kind,
-            size=size,
-            rgba=rgba,
-            mass="0.05",
+            type="box",
+            size=" ".join(map(str, block.half)),
+            rgba=" ".join(map(str, (*block.rgb, 1))),
+            mass=str(block.mass),
             friction="1.5 0.02 0.001",
             condim="4",
             contype="1",
             conaffinity="3",
         )
+    right, up, _ = camera_axes()
     ET.SubElement(
         world,
         "camera",
-        name="scene_cam",
-        pos="0.95 -0.55 0.65",
-        xyaxes="0.5 0.866 0 -0.45 0.26 0.85",
-        fovy="55",
+        name=CAMERA_NAME,
+        pos=" ".join(map(str, CAMERA_EYE)),
+        xyaxes=" ".join(f"{v:.4f}" for v in (*right, *up)),
+        fovy=str(CAMERA_FOVY_DEG),
     )
     for body in world.iter("body"):
         if body.get("name") == "link7":
             ET.SubElement(body, "site", name="flange", pos="0 0 0", size="0.005")
-            ET.SubElement(
-                body,
-                "geom",
-                name="mount_spacer",
-                type="cylinder",
-                size="0.03 0.015",
-                pos="0 0 0.015",
-                rgba="0.25 0.25 0.28 1",
-                mass="0.05",
-                contype="2",
-                conaffinity="1",
-            )
         if body.get("name") == "R_hand_base_link":
             ET.SubElement(
                 body,
@@ -198,7 +145,7 @@ def decorate(mjcf: Path, unitree: Path) -> None:
             dampratio="1",
             forcerange="-60 60",
         )
-    for name, joint in FINGER_JOINTS:
+    for name, joint in FINGER_JOINTS.items():
         ET.SubElement(
             actuator,
             "position",
@@ -230,10 +177,13 @@ def main() -> None:
     parser.add_argument("--agx", type=Path, required=True)
     parser.add_argument("--unitree", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--urdf-out", type=Path, help="also write the combined URDF (for Isaac)")
     args = parser.parse_args()
+    if args.urdf_out:
+        ET.ElementTree(combined_urdf(args.agx, args.unitree)).write(args.urdf_out)
     with tempfile.TemporaryDirectory() as tmp:
         urdf = Path(tmp) / "nero_inspire.urdf"
-        ET.ElementTree(combined_urdf(args.agx, args.unitree)).write(urdf)
+        ET.ElementTree(mujoco_urdf(args.agx, args.unitree)).write(urdf)
         mujoco.MjModel.from_xml_path(str(urdf))
         mujoco.mj_saveLastXML(str(args.out), mujoco.MjModel.from_xml_path(str(urdf)))
     decorate(args.out, args.unitree)

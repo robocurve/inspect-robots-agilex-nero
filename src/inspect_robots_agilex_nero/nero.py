@@ -213,10 +213,16 @@ BackendFactory = Callable[[NeroConfig], Backends]
 
 def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - backends
     """Kinematic stand-ins, or the real arm and hand."""
-    if cfg.backend == "mujoco":
-        from inspect_robots_agilex_nero._mujoco import MujocoNero
+    if cfg.backend in ("mujoco", "isaaclab"):
+        sim: Any
+        if cfg.backend == "mujoco":
+            from inspect_robots_agilex_nero._mujoco import MujocoNero
 
-        sim = MujocoNero(cfg)
+            sim = MujocoNero(cfg)
+        else:
+            from inspect_robots_agilex_nero._isaaclab import IsaacLabNero
+
+            sim = IsaacLabNero(cfg)
         return Backends(
             sim,
             sim if cfg.fingers_enabled else None,

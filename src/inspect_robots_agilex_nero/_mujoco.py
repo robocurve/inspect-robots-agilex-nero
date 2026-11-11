@@ -12,7 +12,6 @@ Not unit tested (needs MuJoCo and the vendor models); verified by running.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
@@ -20,44 +19,15 @@ import numpy.typing as npt
 
 from inspect_robots_agilex_nero.config import FINGER_LABELS, NeroConfig
 from inspect_robots_agilex_nero.nero import FlangePose, rpy_matrix
+from inspect_robots_agilex_nero.sim_layout import (
+    ARM_JOINTS,
+    CAMERA_NAME,
+    FINGER_JOINTS,
+    matrix_rpy,
+    start_rotation,
+)
 
 Vec = npt.NDArray[np.float64]
-
-ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 8))
-#: Inspire control name to the joint its motor drives in the Unitree model.
-FINGER_JOINTS = {
-    "little_finger": "R_pinky_proximal_joint",
-    "ring_finger": "R_ring_proximal_joint",
-    "middle_finger": "R_middle_proximal_joint",
-    "index_finger": "R_index_proximal_joint",
-    "thumb_bend": "R_thumb_proximal_pitch_joint",
-    "thumb_rotate": "R_thumb_proximal_yaw_joint",
-}
-
-
-def _start_rotation() -> Vec:
-    """Palm down, fingers forward and 10 degrees down, thumb to the left.
-
-    In the scene's mount the fingers lie along the flange +z axis, the palm
-    faces flange -x and the thumb sits toward flange -y. The Nero's wrist
-    (joint 6) bends only about 45 degrees, so the hand points roughly along
-    the forearm. The tilt keeps the pose away from the roll-pitch-yaw
-    singularity at 90 degrees of pitch.
-    """
-    tilt = math.radians(10.0)
-    fingers = np.asarray((math.cos(tilt), 0.0, -math.sin(tilt)))
-    palm_normal = np.asarray((-math.sin(tilt), 0.0, -math.cos(tilt)))
-    x_axis = -palm_normal
-    y_axis = np.cross(fingers, x_axis)
-    return np.column_stack((x_axis, y_axis, fingers))
-
-
-def matrix_rpy(rotation: Vec) -> Vec:
-    """Inverse of ``rpy_matrix`` (fixed-axis roll, pitch, yaw)."""
-    pitch = -math.asin(max(-1.0, min(1.0, float(rotation[2, 0]))))
-    roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
-    yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
-    return np.asarray((roll, pitch, yaw), dtype=np.float64)
 
 
 class MujocoNero:
@@ -90,7 +60,7 @@ class MujocoNero:
         self._renderer: Any = None
         self.stopped = False
         # Start with the hand a little above home, palm down.
-        start_rpy = matrix_rpy(_start_rotation())
+        start_rpy = matrix_rpy(start_rotation())
         offset = rpy_matrix(start_rpy) @ np.asarray(cfg.tcp_offset)
         start = np.asarray(cfg.home_pos) + np.asarray((0.0, 0.0, 0.05)) - offset
         q = self._ik(start, start_rpy, np.asarray((0.0, 0.6, 0.0, 1.2, 0.0, 0.6, 0.0)))
@@ -188,7 +158,7 @@ class MujocoNero:
             self._renderer = self._mj.Renderer(
                 self.model, self._cfg.camera_height, self._cfg.camera_width
             )
-        self._renderer.update_scene(self.data, camera=self._cfg.camera_name)
+        self._renderer.update_scene(self.data, camera=CAMERA_NAME)
         return np.asarray(self._renderer.render(), dtype=np.uint8)
 
     def object_position(self, name: str) -> Vec:
