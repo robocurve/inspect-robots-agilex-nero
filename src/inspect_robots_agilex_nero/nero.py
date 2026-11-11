@@ -195,10 +195,17 @@ class KinematicHand:
 
 @dataclass
 class Backends:
-    """The arm and, unless ``hand=none``, the hand."""
+    """The arm and, unless ``hand=none``, the hand.
+
+    A simulator also supplies its own clock, sleep (which steps physics) and
+    camera; the embodiment then runs on simulation time.
+    """
 
     arm: ArmDriver
     hand: HandDriver | None
+    clock: Callable[[], float] | None = None
+    sleep: Callable[[float], None] | None = None
+    camera: Callable[[], npt.NDArray[np.uint8]] | None = None
 
 
 BackendFactory = Callable[[NeroConfig], Backends]
@@ -206,6 +213,17 @@ BackendFactory = Callable[[NeroConfig], Backends]
 
 def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - backends
     """Kinematic stand-ins, or the real arm and hand."""
+    if cfg.backend == "mujoco":
+        from inspect_robots_agilex_nero._mujoco import MujocoNero
+
+        sim = MujocoNero(cfg)
+        return Backends(
+            sim,
+            sim if cfg.fingers_enabled else None,
+            clock=sim.sim_time,
+            sleep=sim.advance,
+            camera=sim.read_frame,
+        )
     if cfg.backend == "kinematic":
         return Backends(
             KinematicArm(clock=time.monotonic), KinematicHand() if cfg.fingers_enabled else None

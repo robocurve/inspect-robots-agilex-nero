@@ -56,6 +56,36 @@ it is backwards. Reset sets the hand's speed
 and force limits (`hand_speed_value`, `hand_force_value`, default 500 each).
 Set `hand=none` for a station without a hand.
 
+## Simulation (MuJoCo)
+
+`backend=mujoco` runs the same embodiment on a MuJoCo scene: the Nero from
+AgileX's `agx_arm_urdf` (MIT) with the right Inspire DFQ hand from Unitree's
+`unitree_ros` (BSD-3), on a table with a red and a blue block, seen by a
+fixed scene camera. The vendor models are not shipped; build the scene from
+your own checkouts:
+
+```bash
+uv pip install -e ".[sim]"
+python scripts/build_mujoco_scene.py --agx PATH/agx_arm_urdf \
+    --unitree PATH/unitree_ros --out PATH/nero_scene.xml   # prints tcp_offset
+inspect-robots run --policy agent --embodiment nero_inspire \
+    -E backend=mujoco -E mujoco_scene=PATH/nero_scene.xml \
+    -E tcp_offset=-0.025,-0.01,0.155 -E home_pos=0.45,0.05,0.22 \
+    -E x_min=0.38 -E x_max=0.65 -E z_min=0.005 -E z_max=0.40 -E unattended=true \
+    -P model=anthropic/claude-opus-5-5 --instruction "push the red block toward the blue one"
+```
+
+What the sim stands in for: pyAgxArm's planner (6-D IK on the flange, then
+joint position control) and the Inspire serial link (position control of
+the six motors, with the coupled finger joints following). It runs on
+simulation time. The mount is a guess (a 3 cm spacer, fingers along the
+flange axis), and the arm starts palm down with the fingers forward, because
+the Nero's wrist bends only about 45 degrees.
+
+Known limit: grasping is not reliable in this scene. With MuJoCo's convex
+collision hulls the fingers tend to push small blocks away, and a few
+contacts go unstable. Reaching, pushing and finger gestures work.
+
 ## To fill in on site
 
 - `tcp_offset`: flange to hand point through the custom mount.

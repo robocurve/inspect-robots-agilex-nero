@@ -94,6 +94,8 @@ class NeroEmbodiment:
         self._poll_end = poll_end or default_poll_end
         self._clock = clock or time.monotonic
         self._sleep = sleep_fn or time.sleep
+        self._own_clock, self._own_sleep = self._clock, self._sleep
+        self._own_camera = camera_reader
         self._atexit = atexit_module
         self._backends: Backends | None = None
         self._rpy: Vec | None = None
@@ -125,6 +127,10 @@ class NeroEmbodiment:
         if self._backends is None:
             self._backends = self._backend_factory(self._cfg)
             self._atexit.register(self._backstop)
+            if self._backends.clock is not None and self._backends.sleep is not None:
+                self._clock, self._sleep = self._backends.clock, self._backends.sleep
+            if self._camera_reader is None and self._backends.camera is not None:
+                self._camera_reader = self._backends.camera
         try:
             if not self._cfg.unattended:
                 self._operator.wait_ready(self.READY_PROMPT)
@@ -217,6 +223,8 @@ class NeroEmbodiment:
             except BaseException as exc:
                 error = error or exc
         self._atexit.unregister(self._backstop)
+        self._clock, self._sleep = self._own_clock, self._own_sleep
+        self._camera_reader = self._own_camera
         if error is not None:
             raise error
 

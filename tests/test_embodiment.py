@@ -286,3 +286,28 @@ def test_eval_reaches_down_and_grips(tmp_path: Path) -> None:
     np.testing.assert_allclose(rig.emb._hand_point(), rig.cfg.home_pos, atol=1e-9)
     assert rig.arm.connected is True
     rig.emb.close()
+
+
+def test_a_simulator_backend_supplies_clock_sleep_and_camera() -> None:
+    from inspect_robots_agilex_nero.nero import Backends
+
+    rig = Rig()
+    sim_clock = FakeClock()
+    frames: list[int] = []
+
+    def sim_camera() -> Any:
+        frames.append(1)
+        return rig.frame
+
+    arm = KinematicArm(clock=sim_clock)
+    emb = type(rig.emb)(
+        rig.cfg,
+        backend_factory=lambda _: Backends(
+            arm, KinematicHand(), clock=sim_clock, sleep=sim_clock.sleep, camera=sim_camera
+        ),
+        atexit_module=rig.atexit,
+    )
+    emb.reset(SCENE)
+    assert sim_clock.sleeps and frames  # paced and rendered by the simulator
+    emb.close()
+    assert emb._clock is not sim_clock and emb._camera_reader is None

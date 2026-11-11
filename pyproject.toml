@@ -25,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sim = [
+    "mujoco>=3.2",
+]
 hardware = [
     "pyserial>=3.5",
     "opencv-python-headless>=4.8",
@@ -76,7 +79,7 @@ strict = true
 files = ["src/inspect_robots_agilex_nero"]
 
 [[tool.mypy.overrides]]
-module = ["pyAgxArm", "pyAgxArm.*", "serial", "serial.*", "cv2", "cv2.*"]
+module = ["pyAgxArm", "pyAgxArm.*", "serial", "serial.*", "cv2", "cv2.*", "mujoco", "mujoco.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -87,6 +90,8 @@ pythonpath = ["tests"]
 
 [tool.coverage.run]
 branch = true
+# Needs MuJoCo and the vendor models; verified by running, not unit tested.
+omit = ["*/_mujoco.py"]
 source = ["inspect_robots_agilex_nero"]
 
 [tool.coverage.report]

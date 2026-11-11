@@ -26,7 +26,7 @@ from inspect_robots.spaces import (
 
 Vec = npt.NDArray[np.float64]
 
-BACKENDS: tuple[str, ...] = ("sdk", "kinematic")
+BACKENDS: tuple[str, ...] = ("sdk", "kinematic", "mujoco")
 HANDS: tuple[str, ...] = ("inspire", "none")
 
 #: The Inspire RH56's six motors, in its register order.
@@ -107,6 +107,8 @@ class NeroConfig:
     camera_height: int = 480
     camera_width: int = 640
     camera_device: str = "0"
+    # Simulation (backend=mujoco): scene from scripts/build_mujoco_scene.py.
+    mujoco_scene: str = ""
     # Run.
     unattended: bool = False
     docs_extra: str = ""
