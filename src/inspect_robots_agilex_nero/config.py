@@ -93,6 +93,12 @@ class NeroConfig:
     enable_timeout_s: float = 5.0
     settle_tolerance_m: float = 0.01
     home_timeout_s: float = 15.0
+    #: How far the hand target may run ahead of the measured hand point. If the
+    #: arm lags or is blocked, the target stops advancing, so the arm never has
+    #: a distant target to catch up to (or keep driving to if this process dies).
+    max_target_lead_m: float = 0.04
+    #: Reset only homes automatically from at most this far outside the box.
+    home_margin_m: float = 0.05
     # Inspire RH56 hand (RS485, Inspire frame protocol).
     hand: str = "inspire"
     hand_port: str = "/dev/ttyUSB0"
@@ -129,9 +135,13 @@ class NeroConfig:
             "enable_timeout_s",
             "settle_tolerance_m",
             "home_timeout_s",
+            "max_target_lead_m",
+            "home_margin_m",
         ):
             _require_positive(name, getattr(self, name))
         for low, high in (("x_min", "x_max"), ("y_min", "y_max"), ("z_min", "z_max")):
+            if not (math.isfinite(getattr(self, low)) and math.isfinite(getattr(self, high))):
+                raise ValueError(f"{low} and {high} must be finite")
             if not getattr(self, low) < getattr(self, high):
                 raise ValueError(f"{low} must be below {high}")
         if len(self.home_pos) != 3 or len(self.tcp_offset) != 3:

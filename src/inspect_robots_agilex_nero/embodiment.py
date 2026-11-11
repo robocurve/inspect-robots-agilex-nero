@@ -2,10 +2,11 @@
 
 Each action moves the hand point (the ``tcp_offset`` point on the mount) by a
 few centimetres in the arm base frame and opens or closes each finger motor. The embodiment
-owns the target: it adds the step, clamps it to the workspace box, converts
-it to a flange target with the orientation held from reset, and hands it to
-the arm's own planner. The arm holds its last target on its own, so a slow
-policy or a dead process leaves it still, not moving.
+owns the target: it adds the step (speed-capped in any direction), clamps it
+to the workspace box and to a short lead over the measured hand, converts it
+to a flange target with the orientation held from reset, and hands it to the
+arm's own planner. If this process stops, the arm finishes its last short
+move and stays there.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from inspect_robots_agilex_nero.nero import (
     rpy_matrix,
 )
 from inspect_robots_agilex_nero.operator import OperatorIO, default_poll_end
+from inspect_robots_agilex_nero.sim_layout import SIM_DOCS, SIM_SETTINGS
 
 Vec = npt.NDArray[np.float64]
 CameraReader = Callable[[], npt.NDArray[np.uint8]]
@@ -97,6 +99,9 @@ class NeroEmbodiment:
         atexit_module: Any = atexit,
         **flat: Any,
     ) -> None:
+        if config is None and str(flat.get("backend", "")).strip() in ("mujoco", "isaaclab"):
+            # The simulated station's settings, under anything given explicitly.
+            flat = {**SIM_SETTINGS, "docs_extra": SIM_DOCS, **flat}
         self._cfg = config if config is not None else NeroConfig.from_kwargs(**flat)
         if not isinstance(self._cfg, NeroConfig):
             raise TypeError(f"NeroEmbodiment needs a NeroConfig; got {type(self._cfg).__name__}")
@@ -134,23 +139,26 @@ class NeroEmbodiment:
     # ------------------------------------------------------------------ lifecycle
 
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
-        """Connect lazily, wait for the operator, glide home, open the hand, observe."""
+        """Wait for the operator, connect lazily, home, open the hand, observe.
+
+        The operator confirms readiness before anything connects, because
+        connecting enables the arm. A simulator's scene is reset on every reset
+        after the first. ``seed`` is unused: the station is deterministic.
+        """
         del seed
-        if self._backends is None:
-            self._backends = self._backend_factory(self._cfg)
-            self._atexit.register(self._backstop)
-            if self._backends.clock is not None and self._backends.sleep is not None:
-                self._clock, self._sleep = self._backends.clock, self._backends.sleep
-            if self._camera_reader is None and self._backends.camera is not None:
-                self._camera_reader = self._backends.camera
         try:
             if not self._cfg.unattended:
                 self._operator.wait_ready(self.READY_PROMPT)
+            if self._backends is None:
+                self._connect()
+            elif self._backends.reset_scene is not None:
+                self._backends.reset_scene()
             backends = self._require()
             start = self._read_flange()
             self._rpy = start.rpy.copy()
             self._offset_world = rpy_matrix(start.rpy) @ np.asarray(self._cfg.tcp_offset)
             self._target = start.position + self._offset_world
+            self._check_start(self._target)
             self._glide_home()
             self._fingers = np.zeros(6, dtype=np.float64)
             if backends.hand is not None:
@@ -159,23 +167,24 @@ class NeroEmbodiment:
             self.num_steps = 0
             return self._observe()
         except BaseException:
-            self.close()
+            self._fail_safe()
             raise
 
     def step(self, action: Action) -> StepResult:
-        """Clamp, move the target, command the arm and hand, pace, observe."""
+        """Clamp, move the target, command the arm and hand, pace, observe.
+
+        Any failure, a malformed action included, holds the arm and closes.
+        """
         backends = self._require()
-        command = np.asarray(action.data, dtype=np.float64).reshape(-1)
-        if command.shape != self._cfg.low.shape:
-            size = self._cfg.low.size
-            raise ValueError(f"Nero action must have {size} values; got {command.shape}")
-        if not np.isfinite(command).all():
-            raise ValueError("action must contain only finite values")
-        clamped = np.clip(command, self._cfg.low, self._cfg.high)
         try:
-            self._target = np.clip(
-                self._target + clamped[:3], self._cfg.box_low, self._cfg.box_high
-            )
+            command = np.asarray(action.data, dtype=np.float64).reshape(-1)
+            if command.shape != self._cfg.low.shape:
+                size = self._cfg.low.size
+                raise ValueError(f"Nero action must have {size} values; got {command.shape}")
+            if not np.isfinite(command).all():
+                raise ValueError("action must contain only finite values")
+            clamped = np.clip(command, self._cfg.low, self._cfg.high)
+            self._target = self._next_target(clamped[:3])
             self._command_arm()
             if backends.hand is not None:
                 self._fingers = np.clip(self._fingers + clamped[3:], 0.0, 1.0)
@@ -183,19 +192,18 @@ class NeroEmbodiment:
             self._sleep(1.0 / self._cfg.control_hz)
             self.num_steps += 1
             observation = self._observe()
+            if not self._cfg.unattended and self._poll_end():
+                backends.arm.hold()
+                success = self._operator.confirm_success()
+                return StepResult(
+                    observation=observation,
+                    terminated=True,
+                    termination_reason="success" if success else "failure",
+                    info={"operator_confirmed": success},
+                )
         except BaseException:
-            self._safe_hold()
-            self.close()
+            self._fail_safe()
             raise
-        if not self._cfg.unattended and self._poll_end():
-            self._safe_hold()
-            success = self._operator.confirm_success()
-            return StepResult(
-                observation=observation,
-                terminated=True,
-                termination_reason="success" if success else "failure",
-                info={"operator_confirmed": success},
-            )
         return StepResult(observation=observation, terminated=False)
 
     def health(self) -> HealthReport:
@@ -209,10 +217,14 @@ class NeroEmbodiment:
         return HealthReport((HealthCheck("arm_state", True),))
 
     def park(self) -> None:
-        """Glide the hand home. Never disables the arm."""
+        """Glide the hand home. Never disables the arm; a failure holds it and closes."""
         if self._backends is None:
             return
-        self._glide_home()
+        try:
+            self._glide_home()
+        except BaseException:
+            self._fail_safe()
+            raise
 
     def emergency_stop(self) -> None:
         """Lower the arm slowly with damping (pyAgxArm's electronic e-stop)."""
@@ -256,9 +268,39 @@ class NeroEmbodiment:
         with contextlib.suppress(Exception):
             self.close()
 
-    def _safe_hold(self) -> None:
-        with contextlib.suppress(Exception):
-            self._require().arm.hold()
+    def _connect(self) -> None:
+        self._backends = self._backend_factory(self._cfg)
+        self._atexit.register(self._backstop)
+        if self._backends.clock is not None and self._backends.sleep is not None:
+            self._clock, self._sleep = self._backends.clock, self._backends.sleep
+        if self._camera_reader is None and self._backends.camera is not None:
+            self._camera_reader = self._backends.camera
+
+    def _fail_safe(self) -> None:
+        """Hold and close after a failure, keeping the original error the one raised."""
+        with contextlib.suppress(BaseException):
+            self.close()
+
+    def _check_start(self, hand: Vec) -> None:
+        """Refuse to home automatically from well outside the workspace box."""
+        margin = self._cfg.home_margin_m
+        if np.any(hand < self._cfg.box_low - margin) or np.any(hand > self._cfg.box_high + margin):
+            raise RuntimeError(
+                f"the hand is at {tuple(np.round(hand, 3))}, outside the workspace box by more "
+                f"than {margin} m. Move the arm into the workspace by hand (teach mode or the "
+                "AgileX tools), then reset again; this adapter will not home from there."
+            )
+
+    def _next_target(self, delta: Vec) -> Vec:
+        """Add a step to the target, capped in speed, box and lead over the measured hand."""
+        cap = self._cfg.hand_speed / self._cfg.control_hz
+        norm = float(np.linalg.norm(delta))
+        if norm > cap:
+            delta = delta * (cap / norm)
+        target = np.clip(self._target + delta, self._cfg.box_low, self._cfg.box_high)
+        hand = self._hand_point()
+        lead = self._cfg.max_target_lead_m
+        return np.asarray(np.clip(target, hand - lead, hand + lead), dtype=np.float64)
 
     def _read_flange(self) -> FlangePose:
         pose = self._require().arm.read_flange()
@@ -275,7 +317,10 @@ class NeroEmbodiment:
         self._require().arm.move_flange(self._target - self._offset_world, self._rpy.copy())
 
     def _hand_point(self) -> Vec:
-        return self._read_flange().position + self._offset_world
+        """The measured hand point: the flange pose with its measured orientation."""
+        pose = self._read_flange()
+        offset = rpy_matrix(pose.rpy) @ np.asarray(self._cfg.tcp_offset)
+        return np.asarray(pose.position + offset, dtype=np.float64)
 
     def _glide_home(self) -> None:
         """Move the hand point to ``home_pos`` in hand_speed-sized steps, then settle."""
@@ -284,8 +329,10 @@ class NeroEmbodiment:
         step = self._cfg.hand_speed / self._cfg.control_hz
         count = max(1, math.ceil(float(np.max(np.abs(home - start))) / step))
         period = 1.0 / self._cfg.control_hz
+        margin = self._cfg.home_margin_m
+        low, high = self._cfg.box_low - margin, self._cfg.box_high + margin
         for index in range(1, count + 1):
-            self._target = start + (home - start) * (index / count)
+            self._target = np.clip(start + (home - start) * (index / count), low, high)
             self._command_arm()
             self._sleep(period)
         deadline = self._clock() + self._cfg.home_timeout_s

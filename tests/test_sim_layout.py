@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from inspect_robots_agilex_nero.nero import rpy_matrix
 from inspect_robots_agilex_nero.sim_layout import (
@@ -87,3 +88,9 @@ def test_combined_urdf_joins_the_hand_to_link7(tmp_path: Path) -> None:
     assert meshes[1].endswith("robots/g1_description/meshes/R.STL")
     assert mimic_pairs(unitree) == [("R_index_intermediate_joint", "R_index_proximal_joint", 1.6)]
     ET.tostring(root)  # serialises
+
+
+@pytest.mark.parametrize("pitch", [math.pi / 2, -math.pi / 2])
+def test_matrix_rpy_round_trips_at_gimbal_lock(pitch: float) -> None:
+    rotation = rpy_matrix((0.4, pitch, 1.1))
+    np.testing.assert_allclose(rpy_matrix(matrix_rpy(rotation)), rotation, atol=1e-9)

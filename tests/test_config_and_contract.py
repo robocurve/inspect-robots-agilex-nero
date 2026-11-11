@@ -54,6 +54,7 @@ def test_flat_kwargs_are_coerced() -> None:
         ({"firmware": "v2"}, "firmware must be"),
         ({"control_hz": 0}, "control_hz must be"),
         ({"x_min": 0.9}, "x_min must be below x_max"),
+        ({"x_max": float("inf")}, "must be finite"),
         ({"home_pos": (0.3, 0.0)}, "three values"),
         ({"tcp_offset": (0.0, float("nan"), 0.0)}, "finite"),
         ({"home_pos": (0.9, 0.0, 0.3)}, "inside the workspace"),

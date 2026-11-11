@@ -33,18 +33,28 @@ state `hand_pos` (m), `fingers` (6, 0 to 1) and `arm_joints` (7, rad).
 
 ## How it moves the arm
 
-- The embodiment owns the hand target. Each step adds its displacement and
-  clamps to a workspace box (`x_min` to `z_max`), then sends the matching
-  flange pose to the arm's own planner (pyAgxArm `move_p`). The hand point is
-  `tcp_offset` from the flange, set by the Inspire mount.
+- The embodiment owns the hand target. Each step adds its displacement
+  (capped at `hand_speed` in any direction), clamps the target to a workspace
+  box (`x_min` to `z_max`), and never lets it run more than
+  `max_target_lead_m` (4 cm) ahead of the measured hand. It then sends the
+  matching flange pose to the arm's own planner (pyAgxArm `move_p`). The hand
+  point is `tcp_offset` from the flange, set by the Inspire mount.
+- The box constrains targets. `move_p` plans in joint space, so between two
+  targets 2 cm apart the path can stray slightly; keep the box a margin
+  inside anything the hand must not touch.
 - The hand's orientation is held at whatever it was at reset.
-- The arm holds its last target by itself, so there is no streaming deadline:
-  a slow policy or a dead process leaves the arm still.
-- Reset glides the hand to `home_pos` at hand speed and opens the fingers.
-- Close holds the arm where it is and closes the connections. Nothing in
-  this package calls pyAgxArm `disable()` or `reset()`, which drop raised
-  joints. `emergency_stop()` uses the arm's electronic e-stop, which lowers it
-  slowly with damping.
+- The arm keeps driving to its last target by itself. If this process stops,
+  the arm finishes that move (at most `max_target_lead_m` away) and stays
+  there. Nothing on the host can stop it after that: keep the arm's own stop
+  within reach.
+- The operator confirms readiness before anything connects (connecting
+  enables the arm). Reset then homes the hand at hand speed and opens the
+  fingers, and refuses to home from more than `home_margin_m` outside the box.
+- Any failure (a malformed action, lost feedback, a failed park) holds the arm
+  and closes. Hold re-targets the measured joints; without fresh feedback it
+  uses the arm's electronic e-stop instead, which lowers it slowly with
+  damping, rather than sending stale joint angles. Nothing in this package
+  calls pyAgxArm `disable()` or `reset()`, which drop raised joints.
 
 ## Inspire hand
 
@@ -62,7 +72,9 @@ Two simulator backends run the same embodiment on the same station, defined
 once in `sim_layout.py`: the Nero from AgileX's `agx_arm_urdf` (MIT) with the
 right Inspire DFQ hand from Unitree's `unitree_ros` (BSD-3) on a guessed 3 cm
 mount, a table at z = 0 with a red 4 cm block and a blue 5 cm block, and a
-fixed scene camera. `sim_layout.SIM_SETTINGS` holds the run settings both use
+fixed scene camera. `sim_layout.SIM_SETTINGS` holds the run settings both use,
+applied automatically for `backend=mujoco` and `backend=isaaclab` (anything
+you pass explicitly wins), and every reset after the first resets the scene
 (hand point, home, workspace box), so a trial means the same thing in either.
 The vendor models are not shipped; build from your own checkouts:
 

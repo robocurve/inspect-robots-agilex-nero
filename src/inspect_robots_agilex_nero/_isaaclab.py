@@ -181,12 +181,34 @@ class IsaacLabNero:
         self._finger_cmd = np.zeros(len(leaders), dtype=np.float64)
         self._sim_time = 0.0
         self.stopped = False
-        # Servo to the start pose: hand a little above home, palm down.
+        self._go_to_start()
+
+    def _go_to_start(self) -> None:
+        """Servo to the start pose: hand a little above home, palm down."""
+        cfg = self._cfg
         start_rpy = matrix_rpy(start_rotation())
         offset = rpy_matrix(start_rpy) @ np.asarray(cfg.tcp_offset)
         start = np.asarray(cfg.home_pos) + np.asarray((0.0, 0.0, 0.05)) - offset
         self.move_flange(start, start_rpy)
         self.advance(2.0)
+
+    def reset_scene(self) -> None:
+        """Put the robot and blocks back to their start state and re-home."""
+        torch = self._torch
+        robot = self._robot
+        robot.write_joint_state_to_sim(
+            robot.data.default_joint_pos.clone(), torch.zeros_like(robot.data.default_joint_vel)
+        )
+        for block in BLOCKS:
+            body = self._scene[block.name]
+            state = body.data.default_root_state.clone()
+            state[:, :3] += self._scene.env_origins
+            body.write_root_state_to_sim(state)
+        self._scene.reset()
+        self._finger_cmd = np.zeros_like(self._finger_cmd)
+        self._targets = robot.data.default_joint_pos.clone()
+        self.stopped = False
+        self._go_to_start()
 
     # ------------------------------------------------------------------ time
 

@@ -17,6 +17,7 @@ radians, fixed-axis roll-pitch-yaw) is assumed from it.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
@@ -31,6 +32,9 @@ from inspect_robots_agilex_nero.config import NeroConfig
 from inspect_robots_agilex_nero.inspire import InspireHand, open_inspire
 
 Vec = npt.NDArray[np.float64]
+
+#: Feedback older than this is refused (see ``PyAgxArmDriver._fresh``).
+FEEDBACK_STALE_S = 0.5
 
 PYAGXARM_INSTALL = (
     'pip install "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm", '
@@ -206,6 +210,8 @@ class Backends:
     clock: Callable[[], float] | None = None
     sleep: Callable[[float], None] | None = None
     camera: Callable[[], npt.NDArray[np.uint8]] | None = None
+    #: Put the simulated scene (robot, objects, time) back to its start state.
+    reset_scene: Callable[[], None] | None = None
 
 
 BackendFactory = Callable[[NeroConfig], Backends]
@@ -229,6 +235,7 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
             clock=sim.sim_time,
             sleep=sim.advance,
             camera=sim.read_frame,
+            reset_scene=sim.reset_scene,
         )
     if cfg.backend == "kinematic":
         return Backends(
@@ -243,7 +250,10 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
             )
             hand.configure(cfg.hand_speed_value, cfg.hand_force_value)
         except BaseException:
-            arm.disconnect()
+            # Clean up whatever opened: hold the arm, close the hand port, disconnect.
+            for cleanup in (arm.hold, *((hand.close,) if hand is not None else ()), arm.disconnect):
+                with contextlib.suppress(BaseException):
+                    cleanup()
             raise
     return Backends(arm, hand)
 
@@ -266,36 +276,71 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             robot=ArmModel.NERO, firmeware_version=firmware, channel=cfg.can_channel
         )
         robot = AgxArmFactory.create_arm(config)
-        robot.connect()
-        deadline = time.monotonic() + cfg.enable_timeout_s
-        while not robot.enable(255):
-            if time.monotonic() > deadline:
+        try:
+            robot.connect()
+            deadline = time.monotonic() + cfg.enable_timeout_s
+            while not robot.enable(255):
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Nero did not enable; check power, CAN and firmware profile")
+                time.sleep(0.05)
+            robot.set_speed_percent(cfg.speed_percent)
+        except BaseException:
+            with contextlib.suppress(BaseException):
                 robot.disconnect()
-                raise RuntimeError("Nero did not enable; check power, CAN and firmware profile")
-            time.sleep(0.05)
-        robot.set_speed_percent(cfg.speed_percent)
+            raise
         return cls(robot)
 
     @staticmethod
-    def _message(reply: Any) -> Any:
-        return getattr(reply, "msg", reply)
+    def _fresh(reply: Any, what: str) -> Any:
+        """The reply's message, refusing missing or stale feedback.
+
+        pyAgxArm replies carry ``msg``, ``hz`` and ``timestamp``. The units of
+        ``timestamp`` are unverified on hardware: it is checked against wall
+        time when it looks like an epoch time and against the monotonic clock
+        otherwise. A rate of zero means the feed has stopped.
+        """
+        message = getattr(reply, "msg", reply)
+        if message is None:
+            raise RuntimeError(f"Nero {what}: no feedback received")
+        rate = getattr(reply, "hz", None)
+        if isinstance(rate, (int, float)) and rate <= 0:
+            raise RuntimeError(f"Nero {what}: feedback has stopped (0 Hz)")
+        stamp = getattr(reply, "timestamp", None)
+        if isinstance(stamp, (int, float)) and stamp > 0:
+            now = time.time() if stamp > 1e9 else time.monotonic()
+            if now - stamp > FEEDBACK_STALE_S:
+                raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
+        return message
 
     def read_flange(self) -> FlangePose:
-        """Measured flange pose from ``get_flange_pose``."""
-        pose = np.asarray(self._message(self._robot.get_flange_pose()), dtype=np.float64)
+        """Measured flange pose from ``get_flange_pose``, if fresh."""
+        pose = np.asarray(self._fresh(self._robot.get_flange_pose(), "pose"), dtype=np.float64)
         return FlangePose(pose[:3].copy(), pose[3:6].copy())
 
     def read_joints(self) -> Vec:
-        """Measured joints from ``get_joint_angles``."""
-        return np.asarray(self._message(self._robot.get_joint_angles()), dtype=np.float64)
+        """Measured joints from ``get_joint_angles``, if fresh."""
+        q = self._fresh(self._robot.get_joint_angles(), "joints")
+        return np.asarray(q, dtype=np.float64)
 
     def move_flange(self, position: Vec, rpy: Vec) -> None:
         """Planned move to the flange pose with ``move_p``."""
         self._robot.move_p([*map(float, position), *map(float, rpy)])
 
     def hold(self) -> None:
-        """Re-target the measured joints with ``move_j`` so the arm stops in place."""
-        self._robot.move_j([float(q) for q in self.read_joints()])
+        """Re-target the measured joints so the arm stops in place.
+
+        Without fresh, finite joint feedback there is nothing safe to hold, so
+        this falls back to the electronic e-stop (a slow damped descent) rather
+        than sending old joint angles. It never disables the motors.
+        """
+        try:
+            q = self.read_joints()
+            if q.shape != (7,) or not np.all(np.isfinite(q)):
+                raise RuntimeError(f"Nero joints: invalid feedback {q!r}")
+        except Exception as exc:
+            self._robot.electronic_emergency_stop()
+            raise RuntimeError("no fresh joint feedback to hold on; used the e-stop") from exc
+        self._robot.move_j([float(v) for v in q])
 
     def emergency_stop(self) -> None:
         """``electronic_emergency_stop``: slow damped descent."""

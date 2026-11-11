@@ -28,11 +28,16 @@ adapter must be testable in simulation and safe to bring up step by step.
 - Arm: pyAgxArm over CAN (AgileX's SDK for Piper and Nero; git install, not
   on PyPI). The embodiment owns a hand-point target, clamps it to a workspace
   box, converts it to a flange pose through `tcp_offset` and sends it to the
-  arm's planner (`move_p`). The arm holds its last target, so no streaming
-  deadline is needed.
+  arm's planner (`move_p`). Steps are speed-capped in any direction and the
+  target never leads the measured hand by more than `max_target_lead_m`, so
+  if the host stops, the arm finishes at most that short move.
+- Startup: the operator confirms readiness before connecting (connecting
+  enables the arm); reset refuses to home from far outside the box; any
+  failure holds and closes.
 - Stopping: never `disable()` or `reset()`, which pyAgxArm documents as
-  dropping raised joints. `hold()` retargets the measured joints;
-  `emergency_stop()` uses the arm's electronic e-stop, a damped descent.
+  dropping raised joints. `hold()` retargets the measured joints, refusing
+  stale feedback and falling back to the electronic e-stop (a damped
+  descent) when there is none.
 - Hand: Inspire's own RS485 frame protocol (manual V1.0.9, section 2.2), with
   the manual's worked examples as test vectors. Each finger control maps
   linearly between `open_angles` and `closed_angles` (raw 0 to 1000).

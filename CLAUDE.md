@@ -24,8 +24,13 @@ motors.
 
 - Never call pyAgxArm `disable()` or `reset()`: they drop raised joints.
   The stop path is `hold()`; `emergency_stop()` uses the electronic e-stop.
-- Every action is clamped to its bound, and the target to the workspace box.
-- A failing step holds the arm, then closes.
+- Every action is clamped to its bound and speed-capped in any direction; the
+  target is clamped to the workspace box and to `max_target_lead_m` ahead of
+  the measured hand.
+- Readiness is confirmed before connecting, because connecting enables the arm.
+- Any failure in reset, step or park holds the arm, then closes.
+- `hold()` never sends stale joint angles: without fresh feedback it uses the
+  electronic e-stop.
 - `close()` holds, then closes every connection, and never disables motors.
 
 ## CI and releases

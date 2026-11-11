@@ -28,6 +28,9 @@ from inspect_robots_agilex_nero.sim_layout import (
 )
 
 Vec = npt.NDArray[np.float64]
+#: IK convergence: position (m) and orientation (rad) error accepted as reached.
+IK_POS_TOL = 1e-3
+IK_ROT_TOL = 0.02
 
 
 class MujocoNero:
@@ -59,15 +62,28 @@ class MujocoNero:
         self._flange = model.site("flange").id
         self._renderer: Any = None
         self.stopped = False
-        # Start with the hand a little above home, palm down.
+        self.ik_rejections = 0
+        self._go_to_start()
+
+    def _go_to_start(self) -> None:
+        """Place the hand a little above home, palm down, and let it settle."""
+        cfg = self._cfg
         start_rpy = matrix_rpy(start_rotation())
         offset = rpy_matrix(start_rpy) @ np.asarray(cfg.tcp_offset)
         start = np.asarray(cfg.home_pos) + np.asarray((0.0, 0.0, 0.05)) - offset
         q = self._ik(start, start_rpy, np.asarray((0.0, 0.6, 0.0, 1.2, 0.0, 0.6, 0.0)))
+        if q is None:
+            raise RuntimeError("MuJoCo: the start pose above home_pos is unreachable")
         self.data.qpos[self._qadr] = q
         self.data.ctrl[self._arm_act] = q
-        mujoco.mj_forward(model, self.data)
+        self._mj.mj_forward(self.model, self.data)
         self.advance(0.5)
+
+    def reset_scene(self) -> None:
+        """Put the robot, blocks and time back to their start state."""
+        self._mj.mj_resetData(self.model, self.data)
+        self.stopped = False
+        self._go_to_start()
 
     # ------------------------------------------------------------------ time
 
@@ -82,27 +98,43 @@ class MujocoNero:
 
     # ------------------------------------------------------------------ IK
 
-    def _ik(self, position: Vec, rpy: Vec, seed: Vec) -> Vec:
+    def _ik(self, position: Vec, rpy: Vec, seed: Vec) -> Vec | None:
+        """6-D damped least squares; ``None`` if it does not converge.
+
+        The orientation error is the rotation vector between the current and
+        target orientations (``mju_subQuat``, rotated into the world frame),
+        which stays correct up to 180 degrees.
+        """
         mj, model, data = self._mj, self.model, self._scratch
-        target_r = rpy_matrix(rpy)
+        target_q = np.zeros(4)
+        mj.mju_mat2Quat(target_q, rpy_matrix(rpy).reshape(-1))
+        current_q = np.zeros(4)
+        error_local = np.zeros(3)
+        error_r = np.zeros(3)
+        error_p = np.zeros(3)
         q = np.clip(np.asarray(seed, dtype=np.float64), self._lower, self._upper)
         jacp = np.zeros((3, model.nv))
         jacr = np.zeros((3, model.nv))
-        for _ in range(200):
+        for _ in range(300):
             data.qpos[self._qadr] = q
             mj.mj_kinematics(model, data)
             mj.mj_comPos(model, data)
-            current_r = data.site_xmat[self._flange].reshape(3, 3)
+            mj.mju_mat2Quat(current_q, data.site_xmat[self._flange])
+            mj.mju_subQuat(error_local, target_q, current_q)
+            # mju_subQuat gives the error in the flange frame; the Jacobian is in the world frame.
+            error_r = data.site_xmat[self._flange].reshape(3, 3) @ error_local
             error_p = position - data.site_xpos[self._flange]
-            error_r = 0.5 * sum(np.cross(current_r[:, i], target_r[:, i]) for i in range(3))
-            error = np.concatenate((error_p, 0.3 * error_r))
-            if float(np.linalg.norm(error)) < 1e-5:
-                break
+            if np.linalg.norm(error_p) < IK_POS_TOL and np.linalg.norm(error_r) < IK_ROT_TOL / 10:
+                return q
             mj.mj_jacSite(model, data, jacp, jacr, self._flange)
             jac = np.vstack((jacp[:, self._dadr], 0.3 * jacr[:, self._dadr]))
+            error = np.concatenate((error_p, 0.3 * error_r))
             step = jac.T @ np.linalg.solve(jac @ jac.T + 1e-4 * np.eye(6), error)
             q = np.clip(q + np.clip(step, -0.2, 0.2), self._lower, self._upper)
-        return q
+        converged = (
+            np.linalg.norm(error_p) < 5 * IK_POS_TOL and np.linalg.norm(error_r) < IK_ROT_TOL
+        )
+        return q if converged else None
 
     # ------------------------------------------------------------------ ArmDriver
 
@@ -116,9 +148,17 @@ class MujocoNero:
         return np.array(self.data.qpos[self._qadr], dtype=np.float64)
 
     def move_flange(self, position: Vec, rpy: Vec) -> None:
-        """Solve IK from the current command and retarget the arm actuators."""
+        """Solve IK from the current command and retarget the arm actuators.
+
+        An unreachable pose is rejected, as a planner would: the arm keeps its
+        previous target and ``hand_pos`` shows where it really is.
+        """
         seed = self.data.ctrl[self._arm_act].astype(np.float64)
-        self.data.ctrl[self._arm_act] = self._ik(np.asarray(position), np.asarray(rpy), seed)
+        q = self._ik(np.asarray(position), np.asarray(rpy), seed)
+        if q is None:
+            self.ik_rejections += 1
+            return
+        self.data.ctrl[self._arm_act] = q
 
     def hold(self) -> None:
         """Command the arm to stay where it is."""
