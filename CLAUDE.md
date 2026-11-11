@@ -11,6 +11,8 @@ motors.
 - `inspire.py`: Inspire frame protocol over RS485, tested against the
   manual's worked examples.
 - `nero.py`: backend protocols, kinematic stand-ins, the pyAgxArm driver.
+- `check.py`: `inspect-robots-nero-check`, the read-only pre-motion check. It
+  must never enable the arm, command it, or write to the hand.
 - `embodiment.py`: target ownership, workspace clamp, homing, teardown.
 
 ## Working here

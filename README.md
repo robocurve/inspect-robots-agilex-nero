@@ -121,6 +121,25 @@ fingers forward, because the Nero's wrist bends only about 45 degrees.
 Nothing here has run on the physical arm yet. Please go step by step and send
 us the output of each step.
 
+0. **Read-only check, before anything can move.** With the arm powered and
+   resting, CAN up, on the machine wired to it:
+
+   ```bash
+   inspect-robots-nero-check -E can_channel=can0 -E firmware=<profile> \
+       -E hand_port=/dev/ttyUSB0 -E hand_id=<id> -E camera_device=<device>
+   ```
+
+   It connects to the arm without enabling it (so nothing can move), listens
+   for two seconds, and prints each feedback group the adapter relies on:
+   whether it arrived, its raw timestamp, which clock it seems to use and its
+   age, and whether the adapter will accept it. It also reads the hand's
+   finger angles (no writes) and one camera frame, and ends with READY or NOT
+   READY. Why: when the adapter cannot trust the arm's feedback, it stops the
+   arm with the electronic e-stop, which lowers it slowly. A NOT READY here
+   (a missing group, a different timestamp unit) is a small fix to make before
+   the arm moves. If the feedback is fine but slower than expected, raise
+   `feedback_stale_s` (default 0.5 s). On firmware 1.11 or older the arm may
+   send no feedback until switched to normal mode, which this check does not do.
 1. Bring up CAN and set `firmware` to the arm's profile. Measure and set
    `tcp_offset` (flange to the point you want to steer, through the mount),
    then `home_pos` and the workspace box for the table.

@@ -109,3 +109,12 @@ def test_move_estop_and_disconnect() -> None:
     assert [name for name, _ in robot.calls] == ["move_p", "estop", "disconnect"]
     assert robot.calls[0][1] == [0.3, 0.0, 0.4, 3.1, 0.0, 0.0]
     PyAgxArmDriver(SimpleNamespace()).disconnect()  # no disconnect method: nothing to do
+
+
+def test_stamp_clock_names_the_clock_or_refuses() -> None:
+    from inspect_robots_agilex_nero.nero import stamp_age, stamp_clock
+
+    assert stamp_clock(time.time()) == "wall"
+    assert stamp_clock(time.monotonic()) == "monotonic"
+    for bad in (0, -1.0, float("nan"), float("inf"), True, "1.0", None):
+        assert stamp_clock(bad) is None and stamp_age(bad) is None

@@ -35,6 +35,31 @@ Vec = npt.NDArray[np.float64]
 
 #: Feedback older than this is refused (see ``PyAgxArmDriver._fresh``).
 FEEDBACK_STALE_S = 0.5
+
+
+def stamp_clock(stamp: Any) -> str | None:
+    """Which clock a pyAgxArm timestamp appears to use: ``"wall"``, ``"monotonic"`` or None.
+
+    Seconds since the epoch are over 1e9; anything smaller and positive is read
+    as seconds on the monotonic clock. Unverified on hardware: the read-only
+    check (``inspect-robots-nero-check``) prints what the arm actually sends.
+    """
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return None
+    if not math.isfinite(stamp) or stamp <= 0:
+        return None
+    return "wall" if stamp > 1e9 else "monotonic"
+
+
+def stamp_age(stamp: Any) -> float | None:
+    """Seconds since ``stamp`` on the clock it appears to use (negative if ahead)."""
+    clock = stamp_clock(stamp)
+    if clock is None:
+        return None
+    now = time.time() if clock == "wall" else time.monotonic()
+    return float(now - float(stamp))
+
+
 #: pyAgxArm's internal CAN message groups behind the aggregate readings.
 JOINT_GROUPS = ("joint_12", "joint_34", "joint_56", "joint_7")
 POSE_GROUPS = ("end_pose_xy", "end_pose_zrx", "end_pose_ryrz")
@@ -268,8 +293,9 @@ class PyAgxArmDriver:
     Calls follow pyAgxArm's docs and source; untested on hardware.
     """
 
-    def __init__(self, robot: Any) -> None:
+    def __init__(self, robot: Any, *, stale_s: float = FEEDBACK_STALE_S) -> None:
         self._robot = robot
+        self._stale_s = stale_s
 
     @classmethod
     def connect(cls, cfg: NeroConfig) -> PyAgxArmDriver:  # pragma: no cover - hardware
@@ -283,7 +309,7 @@ class PyAgxArmDriver:
             robot=ArmModel.NERO, firmeware_version=firmware, channel=cfg.can_channel
         )
         robot = AgxArmFactory.create_arm(config)
-        driver = cls(robot)
+        driver = cls(robot, stale_s=cfg.feedback_stale_s)
         try:
             robot.connect()
             deadline = time.monotonic() + cfg.enable_timeout_s
@@ -300,8 +326,7 @@ class PyAgxArmDriver:
             raise
         return driver
 
-    @staticmethod
-    def _fresh(reply: Any, what: str, *, check_rate: bool = True) -> Any:
+    def _fresh(self, reply: Any, what: str, *, check_rate: bool = True) -> Any:
         """The reply's message, refusing missing or stale feedback.
 
         pyAgxArm replies carry ``msg``, ``hz`` and ``timestamp``. The units of
@@ -316,14 +341,14 @@ class PyAgxArmDriver:
         if check_rate and isinstance(rate, (int, float)) and rate <= 0:
             raise RuntimeError(f"Nero {what}: feedback has stopped (0 Hz)")
         stamp = getattr(reply, "timestamp", None)
-        if not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
+        age = stamp_age(stamp)
+        if age is None:
             raise RuntimeError(f"Nero {what}: feedback has no valid timestamp ({stamp!r})")
-        now = time.time() if stamp > 1e9 else time.monotonic()
-        if now - stamp > FEEDBACK_STALE_S:
-            raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
-        if stamp - now > FEEDBACK_STALE_S:
+        if age > self._stale_s:
+            raise RuntimeError(f"Nero {what}: feedback is {age:.2f} s old")
+        if -age > self._stale_s:
             # From the future: the clock moved, so age cannot be trusted.
-            raise RuntimeError(f"Nero {what}: feedback timestamp is {stamp - now:.2f} s ahead")
+            raise RuntimeError(f"Nero {what}: feedback timestamp is {-age:.2f} s ahead")
         return message
 
     def _check_groups(self, groups: tuple[str, ...], what: str) -> None:

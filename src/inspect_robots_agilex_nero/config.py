@@ -92,6 +92,8 @@ class NeroConfig:
     speed_percent: int = 20
     enable_timeout_s: float = 5.0
     settle_tolerance_m: float = 0.01
+    #: Arm feedback older than this (seconds) is treated as stale; see the README.
+    feedback_stale_s: float = 0.5
     home_timeout_s: float = 15.0
     #: How far the hand target may run ahead of the measured hand point. If the
     #: arm lags or is blocked, the target stops advancing, so the arm never has
@@ -134,6 +136,7 @@ class NeroConfig:
             "finger_rate",
             "enable_timeout_s",
             "settle_tolerance_m",
+            "feedback_stale_s",
             "home_timeout_s",
             "max_target_lead_m",
             "home_margin_m",
