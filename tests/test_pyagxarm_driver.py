@@ -72,6 +72,7 @@ def test_healthy_feedback_is_accepted_even_though_parser_groups_have_no_rate() -
         (lambda r: setattr(r, "joints", SimpleNamespace(msg=None)), "no feedback"),
         (lambda r: setattr(r, "joints", SimpleNamespace(msg=[0.1] * 7, hz=9.0)), "timestamp"),
         (lambda r: setattr(r, "joints", message([np.nan] * 7, hz=200.0)), "invalid"),
+        (lambda r: setattr(r._parser, "joint_56", message(object(), age=-60.0)), "ahead"),
     ],
 )
 def test_bad_joint_feedback_is_refused_and_hold_uses_the_estop(break_it: Any, match: str) -> None:

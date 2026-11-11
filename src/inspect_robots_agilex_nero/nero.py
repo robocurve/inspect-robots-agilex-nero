@@ -321,6 +321,9 @@ class PyAgxArmDriver:
         now = time.time() if stamp > 1e9 else time.monotonic()
         if now - stamp > FEEDBACK_STALE_S:
             raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
+        if stamp - now > FEEDBACK_STALE_S:
+            # From the future: the clock moved, so age cannot be trusted.
+            raise RuntimeError(f"Nero {what}: feedback timestamp is {stamp - now:.2f} s ahead")
         return message
 
     def _check_groups(self, groups: tuple[str, ...], what: str) -> None:

@@ -501,6 +501,9 @@ def test_a_hand_that_ends_a_step_far_outside_the_box_is_a_fault() -> None:
         rig.arm._target = rig.arm._position.copy()
 
     rig.arm.move_flange = shove  # type: ignore[method-assign]
+    frames: list[int] = []
+    rig.emb._camera_reader = lambda: frames.append(1) or rig.frame  # type: ignore[assignment,func-returns-value]
     with pytest.raises(RuntimeError, match="outside the workspace box"):
         rig.emb.step(act(*([0.0] * 9)))
     assert rig.arm.connected is False
+    assert frames == []  # faulted before touching the camera
