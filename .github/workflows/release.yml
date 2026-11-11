@@ -28,7 +28,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    # Lint, types and the full test suite on the exact commit being released.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install locked dependencies
+        run: uv sync --locked --python 3.11 --extra dev
+      - name: Ruff
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy
+      - name: Tests
+        run: uv run pytest --cov --cov-report=term-missing
+
   cut:
+    needs: [verify]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
@@ -62,8 +82,8 @@ jobs:
 
   publish:
     # Directly on manual release events; after cut on workflow_dispatch.
-    needs: [cut]
-    if: ${{ !cancelled() && (github.event_name == 'release' || needs.cut.result == 'success') }}
+    needs: [verify, cut]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (github.event_name == 'release' || needs.cut.result == 'success') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

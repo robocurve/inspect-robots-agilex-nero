@@ -116,3 +116,12 @@ def test_runtime_requirements_and_device_slots() -> None:
     assert slots == {"can_channel": "can", "hand_port": "serial", "camera_device": "v4l2"}
     fields = set(NeroConfig.__dataclass_fields__)
     assert set(slots) <= fields
+
+
+def test_from_kwargs_is_the_backend_aware_constructor() -> None:
+    from inspect_robots_agilex_nero.sim_layout import TCP_OFFSET
+
+    sim = NeroConfig.from_kwargs(backend="isaaclab", home_pos="0.5,0.0,0.25")
+    assert sim.tcp_offset == TCP_OFFSET and sim.home_pos == (0.5, 0.0, 0.25)
+    assert NeroConfig(backend="mujoco").tcp_offset == (0.0, 0.0, 0.0)  # direct: hardware defaults
+    assert NeroConfig.from_kwargs(backend="kinematic").tcp_offset == (0.0, 0.0, 0.0)

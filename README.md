@@ -33,27 +33,34 @@ state `hand_pos` (m), `fingers` (6, 0 to 1) and `arm_joints` (7, rad).
 
 ## How it moves the arm
 
-- The embodiment owns the hand target. Each step adds its displacement
-  (capped at `hand_speed` in any direction), clamps the target to a workspace
-  box (`x_min` to `z_max`), and never lets it run more than
-  `max_target_lead_m` (4 cm) ahead of the measured hand. It then sends the
-  matching flange pose to the arm's own planner (pyAgxArm `move_p`). The hand
-  point is `tcp_offset` from the flange, set by the Inspire mount.
-- The box constrains targets. `move_p` plans in joint space, so between two
-  targets 2 cm apart the path can stray slightly; keep the box a margin
-  inside anything the hand must not touch.
+- The embodiment owns the hand target. Each step moves it by at most
+  `hand_speed / control_hz` in any direction, keeps it inside a workspace box
+  (`x_min` to `z_max`), and keeps it within `max_target_lead_m` (4 cm) of the
+  measured hand. It then sends the matching flange pose to the arm's own
+  planner (pyAgxArm `move_p`). The hand point is `tcp_offset` from the
+  flange, set by the Inspire mount.
+- `hand_speed` limits how fast the target advances, not how fast the arm
+  moves: each short move runs at the arm's own `speed_percent`, so set that low
+  for a first run. The box constrains targets only. `move_p` plans in joint
+  space and nothing here checks the swept path, so a move can leave the box in
+  between targets (more so near a singularity); keep the box well inside
+  anything the hand must not touch.
 - The hand's orientation is held at whatever it was at reset.
 - The arm keeps driving to its last target by itself. If this process stops,
   the arm finishes that move (at most `max_target_lead_m` away) and stays
   there. Nothing on the host can stop it after that: keep the arm's own stop
   within reach.
 - The operator confirms readiness before anything connects (connecting
-  enables the arm). Reset then homes the hand at hand speed and opens the
-  fingers, and refuses to home from more than `home_margin_m` outside the box.
+  enables the arm). Reset then homes the hand under the same limits as any
+  step, re-reading the hand each step, and opens the fingers. Reset and park
+  refuse to move a hand that is more than `home_margin_m` outside the box, and
+  a step faults if the hand ends up there.
 - Any failure (a malformed action, lost feedback, a failed park) holds the arm
-  and closes. Hold re-targets the measured joints; without fresh feedback it
-  uses the arm's electronic e-stop instead, which lowers it slowly with
-  damping, rather than sending stale joint angles. Nothing in this package
+  and closes. Hold re-targets the measured joints, after checking that each
+  joint's own feedback is fresh; if it cannot (stale or missing feedback, or
+  the hold command fails), it uses the arm's electronic e-stop instead, which
+  lowers it slowly with damping. A failed startup does the same before
+  disconnecting. Nothing in this package
   calls pyAgxArm `disable()` or `reset()`, which drop raised joints.
 
 ## Inspire hand

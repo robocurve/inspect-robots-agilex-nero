@@ -276,6 +276,7 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             robot=ArmModel.NERO, firmeware_version=firmware, channel=cfg.can_channel
         )
         robot = AgxArmFactory.create_arm(config)
+        driver = cls(robot)
         try:
             robot.connect()
             deadline = time.monotonic() + cfg.enable_timeout_s
@@ -285,10 +286,12 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
                 time.sleep(0.05)
             robot.set_speed_percent(cfg.speed_percent)
         except BaseException:
-            with contextlib.suppress(BaseException):
-                robot.disconnect()
+            # The arm may already be enabled: stop it (hold, or the e-stop) before letting go.
+            for cleanup in (driver.hold, robot.disconnect):
+                with contextlib.suppress(BaseException):
+                    cleanup()
             raise
-        return cls(robot)
+        return driver
 
     @staticmethod
     def _fresh(reply: Any, what: str) -> Any:
@@ -306,19 +309,33 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
         if isinstance(rate, (int, float)) and rate <= 0:
             raise RuntimeError(f"Nero {what}: feedback has stopped (0 Hz)")
         stamp = getattr(reply, "timestamp", None)
-        if isinstance(stamp, (int, float)) and stamp > 0:
-            now = time.time() if stamp > 1e9 else time.monotonic()
-            if now - stamp > FEEDBACK_STALE_S:
-                raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
+        if not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
+            raise RuntimeError(f"Nero {what}: feedback has no valid timestamp ({stamp!r})")
+        now = time.time() if stamp > 1e9 else time.monotonic()
+        if now - stamp > FEEDBACK_STALE_S:
+            raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
         return message
 
+    def _check_each_joint(self) -> None:
+        """Refuse if any single joint's feedback is stale.
+
+        pyAgxArm's aggregate replies take their timestamp from the last joint
+        group to arrive, so one silent joint can hide behind fresh ones. Each
+        motor's own state reply (``get_motor_states(i)``) carries its own
+        timestamp; this checks all seven. Unverified on hardware.
+        """
+        for joint in range(1, 8):
+            self._fresh(self._robot.get_motor_states(joint), f"joint {joint}")
+
     def read_flange(self) -> FlangePose:
-        """Measured flange pose from ``get_flange_pose``, if fresh."""
+        """Measured flange pose from ``get_flange_pose``, if it and every joint are fresh."""
+        self._check_each_joint()
         pose = np.asarray(self._fresh(self._robot.get_flange_pose(), "pose"), dtype=np.float64)
         return FlangePose(pose[:3].copy(), pose[3:6].copy())
 
     def read_joints(self) -> Vec:
         """Measured joints from ``get_joint_angles``, if fresh."""
+        self._check_each_joint()
         q = self._fresh(self._robot.get_joint_angles(), "joints")
         return np.asarray(q, dtype=np.float64)
 
@@ -337,10 +354,10 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             q = self.read_joints()
             if q.shape != (7,) or not np.all(np.isfinite(q)):
                 raise RuntimeError(f"Nero joints: invalid feedback {q!r}")
+            self._robot.move_j([float(v) for v in q])
         except Exception as exc:
             self._robot.electronic_emergency_stop()
-            raise RuntimeError("no fresh joint feedback to hold on; used the e-stop") from exc
-        self._robot.move_j([float(v) for v in q])
+            raise RuntimeError("could not hold on fresh joint feedback; used the e-stop") from exc
 
     def emergency_stop(self) -> None:
         """``electronic_emergency_stop``: slow damped descent."""

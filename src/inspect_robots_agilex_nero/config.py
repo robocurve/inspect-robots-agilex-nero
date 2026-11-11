@@ -171,7 +171,17 @@ class NeroConfig:
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> Self:
-        """Build from CLI-style kwargs, coercing strings and rejecting unknown keys."""
+        """Build from CLI-style kwargs, coercing strings and rejecting unknown keys.
+
+        This is the backend-aware constructor: for ``mujoco`` and ``isaaclab`` it
+        starts from the simulated station's settings (``sim_layout.SIM_SETTINGS``
+        and its notes), under anything given explicitly. ``NeroConfig(...)``
+        called directly always starts from the hardware defaults.
+        """
+        if str(kwargs.get("backend", "")).strip() in ("mujoco", "isaaclab"):
+            from inspect_robots_agilex_nero.sim_layout import SIM_DOCS, SIM_SETTINGS
+
+            kwargs = {**SIM_SETTINGS, "docs_extra": SIM_DOCS, **kwargs}
         known = {item.name for item in fields(cls)}
         unknown = sorted(set(kwargs) - known)
         if unknown:

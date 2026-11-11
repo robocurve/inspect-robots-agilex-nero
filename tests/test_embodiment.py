@@ -360,6 +360,7 @@ def test_a_bad_action_or_a_failed_park_holds_and_closes() -> None:
     arm2 = BrokenArm(rig2.clock)
     rig2.arm = arm2
     rig2.emb.reset(SCENE)
+    rig2.emb.step(act(0.02, *([0.0] * 8)))  # away from home, so park has to move
     arm2.faults["move"] = True
     with pytest.raises(RuntimeError, match="move failed"):
         rig2.emb.park()
@@ -401,3 +402,54 @@ def test_simulator_backends_get_the_station_settings_unless_overridden() -> None
     assert emb._cfg.z_max == 0.35  # explicit settings win
     assert SIM_DOCS in (emb.info.docs or "")
     assert NeroEmbodiment(backend="kinematic")._cfg.tcp_offset == (0.0, 0.0, 0.0)
+
+
+def test_targets_stay_in_the_box_and_within_a_lead_ball_of_the_hand() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    emb = rig.emb
+    lead = rig.cfg.max_target_lead_m
+    hand = np.asarray((0.40, 0.0, 0.20))
+    # Far diagonal proposal: pulled back to the lead distance (a ball, not a cube).
+    target = emb._safe_target(hand + 1.0, hand)
+    assert np.linalg.norm(target - hand) == pytest.approx(lead)
+    # Near the box edge: the target stays inside the box.
+    edge = np.asarray((0.54, 0.0, 0.20))
+    target = emb._safe_target(edge + np.asarray((0.5, 0.0, 0.0)), edge)
+    assert target[0] == pytest.approx(rig.cfg.x_max)
+    # A hand just outside the box (within the margin) is pulled back toward it.
+    outside = np.asarray((0.58, 0.0, 0.20))
+    target = emb._safe_target(outside, outside)
+    assert target[0] < outside[0]
+    # A hand far outside the box is a fault, not a silent clamp.
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        emb._safe_target(hand, np.asarray((0.65, 0.0, 0.20)))
+    emb.close()
+
+
+def test_homing_respects_the_lead_and_one_deadline() -> None:
+    rig = Rig(home_timeout_s=2.0)
+    rig.arm = KinematicArm(clock=rig.clock, speed_m_s=0.0)  # a blocked arm
+    leads: list[float] = []
+    original = rig.arm.move_flange
+
+    def record(position: Any, rpy: Any) -> None:
+        hand = rig.arm.read_flange().position
+        leads.append(float(np.linalg.norm(np.asarray(position) - hand)))
+        original(position, rpy)
+
+    rig.arm.move_flange = record  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="did not reach home"):
+        rig.emb.reset(SCENE)
+    assert leads and max(leads) <= rig.cfg.max_target_lead_m + 1e-12
+    assert rig.clock.now - 100.0 <= 2.0 + 0.2 + 1e-9  # one deadline for the whole move
+
+
+def test_park_refuses_from_far_outside_the_box() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    rig.arm._position = np.asarray((0.05, 0.0, 0.25))  # pushed away by hand
+    rig.arm._target = rig.arm._position.copy()
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        rig.emb.park()
+    assert rig.arm.connected is False

@@ -2,8 +2,8 @@
 
 Each action moves the hand point (the ``tcp_offset`` point on the mount) by a
 few centimetres in the arm base frame and opens or closes each finger motor. The embodiment
-owns the target: it adds the step (speed-capped in any direction), clamps it
-to the workspace box and to a short lead over the measured hand, converts it
+owns the target: it adds the step (capped in any direction), keeps it in the
+workspace box and within a short lead of the measured hand, converts it
 to a flange target with the orientation held from reset, and hands it to the
 arm's own planner. If this process stops, the arm finishes its last short
 move and stays there.
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import math
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, ClassVar
@@ -35,7 +34,6 @@ from inspect_robots_agilex_nero.nero import (
     rpy_matrix,
 )
 from inspect_robots_agilex_nero.operator import OperatorIO, default_poll_end
-from inspect_robots_agilex_nero.sim_layout import SIM_DOCS, SIM_SETTINGS
 
 Vec = npt.NDArray[np.float64]
 CameraReader = Callable[[], npt.NDArray[np.uint8]]
@@ -99,9 +97,6 @@ class NeroEmbodiment:
         atexit_module: Any = atexit,
         **flat: Any,
     ) -> None:
-        if config is None and str(flat.get("backend", "")).strip() in ("mujoco", "isaaclab"):
-            # The simulated station's settings, under anything given explicitly.
-            flat = {**SIM_SETTINGS, "docs_extra": SIM_DOCS, **flat}
         self._cfg = config if config is not None else NeroConfig.from_kwargs(**flat)
         if not isinstance(self._cfg, NeroConfig):
             raise TypeError(f"NeroEmbodiment needs a NeroConfig; got {type(self._cfg).__name__}")
@@ -282,25 +277,41 @@ class NeroEmbodiment:
             self.close()
 
     def _check_start(self, hand: Vec) -> None:
-        """Refuse to home automatically from well outside the workspace box."""
+        """Refuse to move from well outside the workspace box (home or park)."""
         margin = self._cfg.home_margin_m
         if np.any(hand < self._cfg.box_low - margin) or np.any(hand > self._cfg.box_high + margin):
             raise RuntimeError(
                 f"the hand is at {tuple(np.round(hand, 3))}, outside the workspace box by more "
                 f"than {margin} m. Move the arm into the workspace by hand (teach mode or the "
-                "AgileX tools), then reset again; this adapter will not home from there."
+                "AgileX tools), then reset again; this adapter will not move it from there."
             )
 
-    def _next_target(self, delta: Vec) -> Vec:
-        """Add a step to the target, capped in speed, box and lead over the measured hand."""
+    def _safe_target(self, proposed: Vec, hand: Vec) -> Vec:
+        """The proposed target, inside the box and within ``max_target_lead_m`` of the hand.
+
+        Clamp to the box first, then pull the target back along the straight line
+        toward the measured hand until it is within the lead distance. While the
+        hand is inside the (convex) box that line stays inside it, so both limits
+        hold at once. A hand more than ``home_margin_m`` outside the box is a fault.
+        """
+        self._check_start(hand)
+        target = np.clip(proposed, self._cfg.box_low, self._cfg.box_high)
+        offset = target - hand
+        distance = float(np.linalg.norm(offset))
+        lead = self._cfg.max_target_lead_m
+        if distance > lead:
+            target = hand + offset * (lead / distance)
+        return np.asarray(target, dtype=np.float64)
+
+    def _capped(self, delta: Vec) -> Vec:
+        """A step no longer than ``hand_speed / control_hz`` in any direction."""
         cap = self._cfg.hand_speed / self._cfg.control_hz
         norm = float(np.linalg.norm(delta))
-        if norm > cap:
-            delta = delta * (cap / norm)
-        target = np.clip(self._target + delta, self._cfg.box_low, self._cfg.box_high)
-        hand = self._hand_point()
-        lead = self._cfg.max_target_lead_m
-        return np.asarray(np.clip(target, hand - lead, hand + lead), dtype=np.float64)
+        return delta * (cap / norm) if norm > cap else delta
+
+    def _next_target(self, delta: Vec) -> Vec:
+        """Add a capped step to the target, then keep it in the box and near the hand."""
+        return self._safe_target(self._target + self._capped(delta), self._hand_point())
 
     def _read_flange(self) -> FlangePose:
         pose = self._require().arm.read_flange()
@@ -323,26 +334,28 @@ class NeroEmbodiment:
         return np.asarray(pose.position + offset, dtype=np.float64)
 
     def _glide_home(self) -> None:
-        """Move the hand point to ``home_pos`` in hand_speed-sized steps, then settle."""
+        """Step the hand point to ``home_pos`` under the same limits as any step.
+
+        Each step reads the hand, moves the target at most one capped step toward
+        home, keeps it in the box and within the lead of the hand, then commands
+        it. One deadline covers the whole move.
+        """
         home = np.asarray(self._cfg.home_pos, dtype=np.float64)
-        start = self._hand_point()
-        step = self._cfg.hand_speed / self._cfg.control_hz
-        count = max(1, math.ceil(float(np.max(np.abs(home - start))) / step))
         period = 1.0 / self._cfg.control_hz
-        margin = self._cfg.home_margin_m
-        low, high = self._cfg.box_low - margin, self._cfg.box_high + margin
-        for index in range(1, count + 1):
-            self._target = np.clip(start + (home - start) * (index / count), low, high)
-            self._command_arm()
-            self._sleep(period)
         deadline = self._clock() + self._cfg.home_timeout_s
-        while float(np.linalg.norm(self._hand_point() - home)) > self._cfg.settle_tolerance_m:
+        hand = self._hand_point()
+        self._target = self._safe_target(hand, hand)
+        while float(np.linalg.norm(home - hand)) > self._cfg.settle_tolerance_m:
             if self._clock() > deadline:
                 raise RuntimeError(
                     f"Nero hand did not reach home {tuple(home)} within "
                     f"{self._cfg.home_timeout_s} s; is home_pos reachable?"
                 )
+            proposed = self._target + self._capped(home - self._target)
+            self._target = self._safe_target(proposed, hand)
+            self._command_arm()
             self._sleep(period)
+            hand = self._hand_point()
 
     def _observe(self) -> Observation:
         backends = self._require()
