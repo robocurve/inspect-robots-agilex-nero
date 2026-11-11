@@ -1,7 +1,7 @@
 """AgileX Nero arm with an Inspire hand, steered by small hand displacements.
 
 Each action moves the hand point (the ``tcp_offset`` point on the mount) by a
-few centimetres in the arm base frame and changes the grip. The embodiment
+few centimetres in the arm base frame and opens or closes each finger motor. The embodiment
 owns the target: it adds the step, clamps it to the workspace box, converts
 it to a flange target with the orientation held from reset, and hands it to
 the arm's own planner. The arm holds its last target on its own, so a slow
@@ -23,7 +23,7 @@ from inspect_robots.embodiment import SELF_PACED, EmbodimentInfo, HealthCheck, H
 from inspect_robots.scene import Scene
 from inspect_robots.types import Action, Observation, StepResult
 
-from inspect_robots_agilex_nero.config import GRIP_KEY, HAND_KEY, JOINTS_KEY, NeroConfig
+from inspect_robots_agilex_nero.config import FINGERS_KEY, HAND_KEY, JOINTS_KEY, NeroConfig
 from inspect_robots_agilex_nero.nero import (
     BackendFactory,
     Backends,
@@ -42,15 +42,24 @@ orientation fixed. Each action is how far things move during one control step:
 - hand_x: metres the hand moves forward, away from the arm's base.
 - hand_y: metres the hand moves to the left, seen from behind the base.
 - hand_z: metres the hand moves up.
-- grip: change in grip, 0 open to 1 closed (all fingers close together).
-hand_pos in the state is the hand point (x, y, z) in metres from the arm's
-base, x forward, y left, z up. grip is the measured grip. arm_joints are the
-seven joint angles in radians. The hand stays inside a box set for this
-station; a move past it stops at the edge, and hand_pos shows where the hand
-really is. A move can be larger than one step's bound; it is split into
-steps. Close the hand slowly around an object and check grip: fingers stop
-when they meet resistance, so a grip well below 1 means something is held.
-If the grip bound is zero this station has no working hand."""
+- little_finger: change in little finger closure, 0 straight to 1 curled.
+- ring_finger: change in ring finger closure, 0 straight to 1 curled.
+- middle_finger: change in middle finger closure, 0 straight to 1 curled.
+- index_finger: change in index finger closure, 0 straight to 1 curled.
+- thumb_bend: change in thumb bend, 0 straight to 1 bent in.
+- thumb_rotate: change in thumb rotation, 0 out to the side to 1 across
+  the palm, facing the fingers.
+Each finger curls as a unit. A whole-hand grasp closes all five and swings
+the thumb across first; a pinch uses thumb_rotate, thumb_bend and
+index_finger only. hand_pos in the state is the hand point (x, y, z) in
+metres from the arm's base, x forward, y left, z up. fingers is the measured
+closure of each of the six, in the same order. arm_joints are the seven joint
+angles in radians. The hand stays inside a box set for this station; a move
+past it stops at the edge, and hand_pos shows where the hand really is. A
+move can be larger than one step's bound; it is split into steps. Fingers
+stop when they meet resistance, so a measured closure well below its command
+means the finger is pressing on something. If the finger bounds are zero
+this station has no working hand."""
 
 
 class NeroEmbodiment:
@@ -90,7 +99,7 @@ class NeroEmbodiment:
         self._rpy: Vec | None = None
         self._offset_world = np.zeros(3, dtype=np.float64)
         self._target = np.asarray(self._cfg.home_pos, dtype=np.float64)
-        self._grip = 0.0
+        self._fingers = np.zeros(6, dtype=np.float64)
         self._instruction: str | None = None
         self.num_steps = 0
         docs = _DOCS
@@ -125,9 +134,9 @@ class NeroEmbodiment:
             self._offset_world = rpy_matrix(start.rpy) @ np.asarray(self._cfg.tcp_offset)
             self._target = start.position + self._offset_world
             self._glide_home()
-            self._grip = 0.0
+            self._fingers = np.zeros(6, dtype=np.float64)
             if backends.hand is not None:
-                backends.hand.set_grip(0.0)
+                backends.hand.set_fingers(self._fingers.copy())
             self._instruction = scene.instruction
             self.num_steps = 0
             return self._observe()
@@ -140,7 +149,8 @@ class NeroEmbodiment:
         backends = self._require()
         command = np.asarray(action.data, dtype=np.float64).reshape(-1)
         if command.shape != self._cfg.low.shape:
-            raise ValueError(f"Nero action must have 4 values; got {command.shape}")
+            size = self._cfg.low.size
+            raise ValueError(f"Nero action must have {size} values; got {command.shape}")
         if not np.isfinite(command).all():
             raise ValueError("action must contain only finite values")
         clamped = np.clip(command, self._cfg.low, self._cfg.high)
@@ -150,8 +160,8 @@ class NeroEmbodiment:
             )
             self._command_arm()
             if backends.hand is not None:
-                self._grip = float(np.clip(self._grip + clamped[3], 0.0, 1.0))
-                backends.hand.set_grip(self._grip)
+                self._fingers = np.clip(self._fingers + clamped[3:], 0.0, 1.0)
+                backends.hand.set_fingers(self._fingers.copy())
             self._sleep(1.0 / self._cfg.control_hz)
             self.num_steps += 1
             observation = self._observe()
@@ -273,9 +283,13 @@ class NeroEmbodiment:
         joints = np.asarray(backends.arm.read_joints(), dtype=np.float64)
         if joints.shape != (7,) or not np.all(np.isfinite(joints)):
             raise ValueError("arm returned invalid joint angles")
-        grip = backends.hand.read_grip() if backends.hand is not None else 0.0
-        if not math.isfinite(grip):
-            raise ValueError("hand returned a non-finite grip")
+        fingers = (
+            np.asarray(backends.hand.read_fingers(), dtype=np.float64)
+            if backends.hand is not None
+            else np.zeros(6, dtype=np.float64)
+        )
+        if fingers.shape != (6,) or not np.all(np.isfinite(fingers)):
+            raise ValueError("hand returned invalid finger closures")
         reader = self._camera_reader or _opencv_reader(self._cfg)
         self._camera_reader = reader
         frame = np.asarray(reader(), dtype=np.uint8)
@@ -288,7 +302,7 @@ class NeroEmbodiment:
             images={name: frame},
             state={
                 HAND_KEY: hand,
-                GRIP_KEY: np.asarray((grip,), dtype=np.float64),
+                FINGERS_KEY: fingers,
                 JOINTS_KEY: joints,
             },
             instruction=self._instruction,

@@ -1,8 +1,8 @@
 """Frozen Nero + Inspire configuration and the spaces derived from it.
 
 The action is a per-control-step displacement of the hand point (``hand_x``,
-``hand_y``, ``hand_z`` in metres, arm base frame) plus a change in grip (0
-open to 1 closed). The hand's orientation is held at whatever it was at
+``hand_y``, ``hand_z`` in metres, arm base frame) plus a change in each of the
+Inspire hand's six motors (0 open to 1 closed). The hand's orientation is held at whatever it was at
 reset. Workspace bounds, home position and the mount offset are guesses until
 someone measures the real station; every one of them is a config field.
 """
@@ -29,13 +29,22 @@ Vec = npt.NDArray[np.float64]
 BACKENDS: tuple[str, ...] = ("sdk", "kinematic")
 HANDS: tuple[str, ...] = ("inspire", "none")
 
-DIM_LABELS: tuple[str, ...] = ("hand_x", "hand_y", "hand_z", "grip")
+#: The Inspire RH56's six motors, in its register order.
+FINGER_LABELS: tuple[str, ...] = (
+    "little_finger",
+    "ring_finger",
+    "middle_finger",
+    "index_finger",
+    "thumb_bend",
+    "thumb_rotate",
+)
+DIM_LABELS: tuple[str, ...] = ("hand_x", "hand_y", "hand_z", *FINGER_LABELS)
 ACTION_DIM = len(DIM_LABELS)
 
-#: State keys: the hand point in the arm base frame (m), the grip (0 open,
-#: 1 closed) and the seven measured arm joint angles (rad).
+#: State keys: the hand point in the arm base frame (m), the six finger
+#: motors (0 open, 1 closed) and the seven measured arm joint angles (rad).
 HAND_KEY = "hand_pos"
-GRIP_KEY = "grip"
+FINGERS_KEY = "fingers"
 JOINTS_KEY = "arm_joints"
 
 ACTION_SEMANTICS = ActionSemantics(
@@ -57,15 +66,18 @@ class NeroConfig:
     flange frame (metres): the custom Inspire mount sets it. ``home_pos`` is
     where the hand point goes at reset. ``speed_percent`` is the arm's own
     speed setting; it must be fast enough to keep up with ``hand_speed``.
-    Inspire values are the hand's raw 0 to 1000 units: ``open_angles`` and
-    ``closed_angles`` are the six DoF (little, ring, middle, index, thumb
-    bend, thumb rotation) at grip 0 and grip 1.
+    Each finger control runs 0 (open) to 1 (closed) and maps linearly onto the
+    hand's raw 0 to 1000 units between ``open_angles`` and ``closed_angles``
+    (little, ring, middle, index, thumb bend, thumb rotation). The manual
+    calls 1000 open for every motor; which way the thumb rotation turns on
+    the lent hand is unverified. ``finger_rate`` is the fastest change per
+    second of any finger control.
     """
 
     backend: str = "sdk"
     control_hz: float = 5.0
     hand_speed: float = 0.10
-    grip_rate: float = 1.0
+    finger_rate: float = 1.0
     x_min: float = 0.20
     x_max: float = 0.55
     y_min: float = -0.35
@@ -89,7 +101,7 @@ class NeroConfig:
     hand_speed_value: int = 500
     hand_force_value: int = 500
     open_angles: tuple[int, ...] = (1000, 1000, 1000, 1000, 1000, 1000)
-    closed_angles: tuple[int, ...] = (0, 0, 0, 0, 0, 1000)
+    closed_angles: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
     # Camera.
     camera_name: str = "scene_cam"
     camera_height: int = 480
@@ -109,7 +121,7 @@ class NeroConfig:
         for name in (
             "control_hz",
             "hand_speed",
-            "grip_rate",
+            "finger_rate",
             "enable_timeout_s",
             "settle_tolerance_m",
             "home_timeout_s",
@@ -154,8 +166,8 @@ class NeroConfig:
         return cls(**{key: _coerce(key, value, defaults[key]) for key, value in kwargs.items()})
 
     @property
-    def grips_enabled(self) -> bool:
-        """Whether the grip dimension does anything."""
+    def fingers_enabled(self) -> bool:
+        """Whether the finger dimensions do anything."""
         return self.hand != "none"
 
     @property
@@ -170,21 +182,22 @@ class NeroConfig:
 
     @property
     def high(self) -> Vec:
-        """Per-step upper bounds: three hand axes, then grip."""
-        grip = self.grip_rate / self.control_hz if self.grips_enabled else 0.0
-        return np.asarray((*([self.hand_speed / self.control_hz] * 3), grip), dtype=np.float64)
+        """Per-step upper bounds: three hand axes, then six fingers."""
+        finger = self.finger_rate / self.control_hz if self.fingers_enabled else 0.0
+        hand = self.hand_speed / self.control_hz
+        return np.asarray((hand, hand, hand, *([finger] * len(FINGER_LABELS))), dtype=np.float64)
 
     @property
     def low(self) -> Vec:
-        """Per-step lower bounds: three hand axes, then grip."""
+        """Per-step lower bounds: three hand axes, then six fingers."""
         return -self.high
 
     def make_action_box(self) -> Box:
-        """The 4-D hand displacement box."""
+        """The 9-D hand and finger displacement box."""
         return Box(shape=(ACTION_DIM,), low=self.low, high=self.high, semantics=ACTION_SEMANTICS)
 
     def make_observation_space(self) -> ObservationSpace:
-        """One camera, hand position, grip and joint angles."""
+        """One camera, hand position, finger closures and joint angles."""
         return ObservationSpace(
             cameras=(
                 CameraSpec(
@@ -197,7 +210,7 @@ class NeroConfig:
             state=StateSpec(
                 fields=(
                     StateField(key=HAND_KEY, shape=(3,), unit="m"),
-                    StateField(key=GRIP_KEY, shape=(1,), unit="normalized"),
+                    StateField(key=FINGERS_KEY, shape=(6,), unit="normalized"),
                     StateField(key=JOINTS_KEY, shape=(7,), unit="rad"),
                 )
             ),

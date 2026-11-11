@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
 import pytest
 
 from inspect_robots_agilex_nero.inspire import (
@@ -12,9 +13,9 @@ from inspect_robots_agilex_nero.inspire import (
     FORCE_SET,
     SPEED_SET,
     InspireHand,
-    angles_to_grip,
+    angles_to_closure,
     checksum,
-    grip_to_angles,
+    closure_to_angles,
     pack_values,
     parse_response,
     read_frame,
@@ -22,7 +23,7 @@ from inspect_robots_agilex_nero.inspire import (
 )
 
 OPEN = (1000,) * 6
-CLOSED = (0, 0, 0, 0, 0, 1000)
+CLOSED = (0, 0, 0, 0, 0, 1000)  # thumb rotation fixed open
 
 
 def test_frames_match_the_manual_examples() -> None:
@@ -68,13 +69,21 @@ def test_values_are_range_checked() -> None:
         pack_values([0] * 5)
 
 
-def test_grip_mapping_round_trips() -> None:
-    assert grip_to_angles(0.0, OPEN, CLOSED) == list(OPEN)
-    assert grip_to_angles(0.5, OPEN, CLOSED) == [500] * 5 + [1000]
-    assert grip_to_angles(7.0, OPEN, CLOSED) == list(CLOSED)
-    assert angles_to_grip([500] * 5 + [123], OPEN, CLOSED) == pytest.approx(0.5)
-    assert angles_to_grip([1200] * 6, OPEN, CLOSED) == 0.0
-    assert angles_to_grip([0] * 6, OPEN, OPEN) == 0.0
+def test_closure_mapping_is_per_finger_and_round_trips() -> None:
+    assert closure_to_angles([0.0] * 6, OPEN, CLOSED) == list(OPEN)
+    assert closure_to_angles([0.0, 0.25, 0.5, 1.0, 7.0, 1.0], OPEN, CLOSED) == [
+        1000,
+        750,
+        500,
+        0,
+        0,
+        1000,
+    ]
+    closure = angles_to_closure([1000, 750, 500, 0, -5, 123], OPEN, CLOSED)
+    np.testing.assert_allclose(closure, (0.0, 0.25, 0.5, 1.0, 1.0, 0.0))
+    np.testing.assert_allclose(angles_to_closure([1200] * 6, OPEN, CLOSED), 0.0)
+    with pytest.raises(ValueError):
+        closure_to_angles([0.0] * 5, OPEN, CLOSED)
 
 
 class FakePort:
@@ -119,9 +128,9 @@ def test_hand_driver_configures_grips_and_reads() -> None:
     hand.configure(speed=400, force=300)
     assert [f[5] | (f[6] << 8) for f in port.written] == [SPEED_SET, FORCE_SET]
     assert port.written[0][7:-1] == pack_values([400] * 6)
-    hand.set_grip(1.0)
-    assert port.angles == list(CLOSED)
-    assert hand.read_grip() == pytest.approx(1.0)
+    hand.set_fingers(np.asarray((1.0, 1.0, 1.0, 0.5, 1.0, 0.0)))
+    assert port.angles == [0, 0, 0, 500, 0, 1000]
+    np.testing.assert_allclose(hand.read_fingers(), (1.0, 1.0, 1.0, 0.5, 1.0, 0.0))
     hand.close()
     assert port.closed
 
@@ -132,8 +141,8 @@ def test_hand_driver_surfaces_nacks_and_short_replies() -> None:
     nack = bytes((1, 4, 0x12, ANGLE_SET & 0xFF, ANGLE_SET >> 8, 0))
     port.reply_override = b"\x90\xeb" + nack + bytes((checksum(nack),))
     with pytest.raises(RuntimeError, match="rejected"):
-        hand.set_grip(0.5)
+        hand.set_fingers(np.full(6, 0.5))
     short = bytes((1, 5, 0x11, ANGLE_ACT & 0xFF, ANGLE_ACT >> 8, 0, 0))
     port.reply_override = b"\x90\xeb" + short + bytes((checksum(short),))
     with pytest.raises(RuntimeError, match="expected 12 data bytes"):
-        hand.read_grip()
+        hand.read_fingers()

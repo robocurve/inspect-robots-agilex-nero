@@ -102,27 +102,25 @@ def parse_response(frame: bytes, hand_id: int, command: int, address: int) -> by
     return bytes(body[5:])
 
 
-def grip_to_angles(
-    grip: float, open_angles: Sequence[int], closed_angles: Sequence[int]
+def closure_to_angles(
+    closure: npt.ArrayLike, open_angles: Sequence[int], closed_angles: Sequence[int]
 ) -> list[int]:
-    """Interpolate the six DoF between open (grip 0) and closed (grip 1)."""
-    alpha = float(np.clip(grip, 0.0, 1.0))
+    """Six closures (0 open, 1 closed) to raw angles between open and closed."""
+    alpha = np.clip(np.asarray(closure, dtype=np.float64).reshape(DOF), 0.0, 1.0)
     opened = np.asarray(open_angles, dtype=np.float64)
     closed = np.asarray(closed_angles, dtype=np.float64)
     return [round(v) for v in opened + alpha * (closed - opened)]
 
 
-def angles_to_grip(
+def angles_to_closure(
     angles: Sequence[int], open_angles: Sequence[int], closed_angles: Sequence[int]
-) -> float:
-    """Project measured angles onto the open-to-closed line; 0 open, 1 closed."""
+) -> Vec:
+    """Raw angles back to six closures; a motor with no open-to-closed span reads 0."""
     opened = np.asarray(open_angles, dtype=np.float64)
     span = np.asarray(closed_angles, dtype=np.float64) - opened
-    moving = span != 0
-    if not np.any(moving):
-        return 0.0
-    fraction = (np.asarray(angles, dtype=np.float64) - opened)[moving] / span[moving]
-    return float(np.clip(np.mean(fraction), 0.0, 1.0))
+    offset = np.asarray(angles, dtype=np.float64) - opened
+    safe = np.where(span == 0, 1.0, span)
+    return np.where(span == 0, 0.0, np.clip(offset / safe, 0.0, 1.0))
 
 
 class InspireHand:
@@ -170,13 +168,13 @@ class InspireHand:
         self.write_block(SPEED_SET, [speed] * DOF)
         self.write_block(FORCE_SET, [force] * DOF)
 
-    def set_grip(self, grip: float) -> None:
-        """Command the fingers to grip ``grip`` (0 open, 1 closed)."""
-        self.write_block(ANGLE_SET, grip_to_angles(grip, self._open, self._closed))
+    def set_fingers(self, closure: Vec) -> None:
+        """Command six closures, 0 open to 1 closed."""
+        self.write_block(ANGLE_SET, closure_to_angles(closure, self._open, self._closed))
 
-    def read_grip(self) -> float:
-        """Measured grip, 0 open to 1 closed."""
-        return angles_to_grip(self.read_block(ANGLE_ACT), self._open, self._closed)
+    def read_fingers(self) -> Vec:
+        """Measured closures of the six motors."""
+        return angles_to_closure(self.read_block(ANGLE_ACT), self._open, self._closed)
 
     def close(self) -> None:
         """Close the serial port. The fingers hold their last command."""

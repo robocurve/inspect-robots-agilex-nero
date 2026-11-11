@@ -79,12 +79,12 @@ class ArmDriver(Protocol):
 class HandDriver(Protocol):
     """What the embodiment needs from a hand backend."""
 
-    def set_grip(self, grip: float) -> None:
-        """Command grip 0 (open) to 1 (closed)."""
+    def set_fingers(self, closure: Vec) -> None:
+        """Command six closures, 0 open to 1 closed."""
         ...
 
-    def read_grip(self) -> float:
-        """Measured grip."""
+    def read_fingers(self) -> Vec:
+        """Measured closures ``(6,)``."""
         ...
 
     def close(self) -> None:
@@ -174,19 +174,19 @@ class KinematicArm:
 
 
 class KinematicHand:
-    """A stand-in hand that reaches its grip instantly."""
+    """A stand-in hand whose fingers reach their command instantly."""
 
     def __init__(self) -> None:
-        self.grip = 0.0
+        self.fingers = np.zeros(6, dtype=np.float64)
         self.closed = False
 
-    def set_grip(self, grip: float) -> None:
-        """Snap to the grip."""
-        self.grip = float(np.clip(grip, 0.0, 1.0))
+    def set_fingers(self, closure: Vec) -> None:
+        """Snap to the closures."""
+        self.fingers = np.clip(np.asarray(closure, dtype=np.float64), 0.0, 1.0)
 
-    def read_grip(self) -> float:
-        """Current grip."""
-        return self.grip
+    def read_fingers(self) -> Vec:
+        """Current closures."""
+        return self.fingers.copy()
 
     def close(self) -> None:
         """Mark closed."""
@@ -208,7 +208,7 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
     """Kinematic stand-ins, or the real arm and hand."""
     if cfg.backend == "kinematic":
         return Backends(
-            KinematicArm(clock=time.monotonic), KinematicHand() if cfg.grips_enabled else None
+            KinematicArm(clock=time.monotonic), KinematicHand() if cfg.fingers_enabled else None
         )
     arm = PyAgxArmDriver.connect(cfg)
     hand: InspireHand | None = None

@@ -16,7 +16,7 @@ from inspect_robots.task import Task
 from inspect_robots.types import Action, ActionChunk, Observation
 
 from conftest import FakeClock, Rig
-from inspect_robots_agilex_nero.config import GRIP_KEY, HAND_KEY, JOINTS_KEY, NeroConfig
+from inspect_robots_agilex_nero.config import FINGERS_KEY, HAND_KEY, JOINTS_KEY, NeroConfig
 from inspect_robots_agilex_nero.nero import (
     ArmDriver,
     FlangePose,
@@ -46,10 +46,10 @@ def test_rpy_matrix_is_a_rotation() -> None:
 
 def test_reset_glides_home_opens_the_hand_and_observes() -> None:
     rig = Rig()
-    rig.hand.grip = 0.7  # type: ignore[union-attr]
+    rig.hand.fingers[:] = 0.7  # type: ignore[union-attr]
     obs = rig.emb.reset(SCENE)
     np.testing.assert_allclose(obs.state[HAND_KEY], rig.cfg.home_pos, atol=1e-9)
-    assert obs.state[GRIP_KEY].tolist() == [0.0]
+    assert obs.state[FINGERS_KEY].tolist() == [0.0] * 6
     assert obs.state[JOINTS_KEY].shape == (7,)
     assert obs.instruction == "pick up the cup"
     assert obs.images["scene_cam"].shape == (48, 64, 3)
@@ -64,18 +64,19 @@ def test_reset_glides_home_opens_the_hand_and_observes() -> None:
 def test_steps_move_the_hand_clamp_to_the_box_and_grip() -> None:
     rig = Rig()
     rig.emb.reset(SCENE)
-    result = rig.emb.step(act(0.5, 0.0, -0.01, 0.15))  # x clamps to the 2 cm bound
+    # x clamps to the 2 cm bound; the index finger to the 0.2 bound.
+    result = rig.emb.step(act(0.5, 0.0, -0.01, 0.0, 0.0, 0.0, 0.9, 0.15, -0.1))
     np.testing.assert_allclose(result.observation.state[HAND_KEY], (0.37, 0.0, 0.29), atol=1e-9)
-    assert result.observation.state[GRIP_KEY].tolist() == [pytest.approx(0.15)]
+    np.testing.assert_allclose(result.observation.state[FINGERS_KEY], (0, 0, 0, 0.2, 0.15, 0))
     for _ in range(20):
-        result = rig.emb.step(act(0.02, 0.0, -0.02, 0.2))
+        result = rig.emb.step(act(0.02, 0.0, -0.02, *([0.2] * 6)))
     np.testing.assert_allclose(result.observation.state[HAND_KEY], (0.55, 0.0, 0.10), atol=1e-9)
-    assert result.observation.state[GRIP_KEY].tolist() == [1.0]
+    np.testing.assert_allclose(result.observation.state[FINGERS_KEY], 1.0)
     assert rig.emb.num_steps == 21 and result.terminated is False
-    with pytest.raises(ValueError, match="4 values"):
+    with pytest.raises(ValueError, match="9 values"):
         rig.emb.step(act(0.0, 0.0))
     with pytest.raises(ValueError, match="finite"):
-        rig.emb.step(act(math.nan, 0.0, 0.0, 0.0))
+        rig.emb.step(act(math.nan, *([0.0] * 8)))
     rig.emb.close()
 
 
@@ -90,8 +91,8 @@ def test_tcp_offset_is_applied_through_the_held_orientation() -> None:
 def test_no_hand_station() -> None:
     rig = Rig(hand=False)
     obs = rig.emb.reset(SCENE)
-    assert obs.state[GRIP_KEY].tolist() == [0.0]
-    rig.emb.step(act(0.0, 0.0, 0.0, 0.0))
+    assert obs.state[FINGERS_KEY].tolist() == [0.0] * 6
+    rig.emb.step(act(*([0.0] * 9)))
     rig.emb.close()
 
 
@@ -100,7 +101,7 @@ def test_operator_ready_prompt_and_success_verdict() -> None:
     rig.emb.reset(SCENE)
     assert "Clear the table" in rig.inputs[0]
     rig.ended = True
-    result = rig.emb.step(act(0.0, 0.0, 0.0, 0.0))
+    result = rig.emb.step(act(*([0.0] * 9)))
     assert result.terminated and result.termination_reason == "success"
     rig.emb.close()
 
@@ -108,7 +109,7 @@ def test_operator_ready_prompt_and_success_verdict() -> None:
 def test_step_before_reset_and_health() -> None:
     rig = Rig()
     with pytest.raises(RuntimeError, match="before reset"):
-        rig.emb.step(act(0.0, 0.0, 0.0, 0.0))
+        rig.emb.step(act(*([0.0] * 9)))
     assert rig.emb.health().checks == ()
     rig.emb.park()  # not connected: a no-op
     rig.emb.emergency_stop()  # not connected: a no-op
@@ -116,7 +117,7 @@ def test_step_before_reset_and_health() -> None:
     assert rig.emb.health().ok
     rig.emb.emergency_stop()
     assert rig.arm.stopped
-    rig.emb.step(act(-0.02, 0.0, 0.0, 0.0))
+    rig.emb.step(act(-0.02, *([0.0] * 8)))
     rig.emb.park()
     np.testing.assert_allclose(rig.emb._hand_point(), rig.cfg.home_pos, atol=1e-9)
     rig.emb.close()
@@ -178,7 +179,7 @@ def test_a_failing_step_holds_the_arm_and_closes() -> None:
     rig.emb.reset(SCENE)
     arm.faults["move"] = True
     with pytest.raises(RuntimeError, match="move failed"):
-        rig.emb.step(act(0.01, 0.0, 0.0, 0.0))
+        rig.emb.step(act(0.01, *([0.0] * 8)))
     assert arm.held == 2  # once on the failure, once in close
     assert arm.connected is False
 
@@ -244,8 +245,8 @@ def test_bad_camera_frame_and_grip_are_refused() -> None:
     with pytest.raises(ValueError, match="camera frame shape"):
         rig.emb.reset(SCENE)
     rig = Rig()
-    rig.hand.read_grip = lambda: math.nan  # type: ignore[method-assign,union-attr]
-    with pytest.raises(ValueError, match="non-finite grip"):
+    rig.hand.read_fingers = lambda: np.full(6, math.nan)  # type: ignore[method-assign,union-attr]
+    with pytest.raises(ValueError, match="invalid finger closures"):
         rig.emb.reset(SCENE)
 
 
@@ -264,7 +265,7 @@ class ReachDownAndGrip:
 
     def act(self, observation: Observation) -> ActionChunk:
         self.seen.append(observation.state[HAND_KEY].copy())
-        return ActionChunk(actions=[act(0.0, 0.01, -0.02, 0.2)] * 5)
+        return ActionChunk(actions=[act(0.0, 0.01, -0.02, *([0.2] * 6))] * 5)
 
 
 def test_eval_reaches_down_and_grips(tmp_path: Path) -> None:
@@ -280,7 +281,7 @@ def test_eval_reaches_down_and_grips(tmp_path: Path) -> None:
     assert logs[0].status == "success", logs[0].error
     # After five steps the hand is 5 cm left and 10 cm lower.
     np.testing.assert_allclose(policy.seen[1], (0.35, 0.05, 0.20), atol=1e-9)
-    assert rig.hand.grip == 1.0  # type: ignore[union-attr]
+    np.testing.assert_allclose(rig.hand.fingers, 1.0)  # type: ignore[union-attr]
     # eval() parks the arm afterwards: the hand glides home, still connected.
     np.testing.assert_allclose(rig.emb._hand_point(), rig.cfg.home_pos, atol=1e-9)
     assert rig.arm.connected is True

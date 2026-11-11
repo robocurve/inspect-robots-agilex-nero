@@ -2,7 +2,8 @@
 
 Inspect Robots embodiment `nero_inspire`: an AgileX Nero 7-joint arm with an
 Inspire RH56 hand on a custom mount, steered by per-step hand displacement
-`(hand_x, hand_y, hand_z, grip)`.
+`(hand_x, hand_y, hand_z)` plus a change in each of the six Inspire finger
+motors.
 
 ## Layout
 

@@ -18,14 +18,18 @@ Each action is one control step's change, `eef_delta_pos`:
 | `hand_x` | m | hand point forward, away from the base |
 | `hand_y` | m | hand point to the left |
 | `hand_z` | m | hand point up |
-| `grip` | 0 to 1 | change in grip, 0 open, 1 closed |
+| `little_finger`, `ring_finger`, `middle_finger`, `index_finger` | 0 to 1 | change in that finger's closure |
+| `thumb_bend` | 0 to 1 | change in thumb bend |
+| `thumb_rotate` | 0 to 1 | change in thumb rotation, out to the side (0) to across the palm (1) |
 
-The bound is `hand_speed / control_hz` (default 0.10 m/s at 5 Hz: 2 cm per
-step) and `grip_rate / control_hz` for the grip. With the `agent` policy the
-LLM calls `move_by`, for example `{"hand_z": -0.1, "grip": 0.6}`.
+These are the Inspire RH56's six motors; each finger curls as a unit. The
+bound is `hand_speed / control_hz` (default 0.10 m/s at 5 Hz: 2 cm per step)
+and `finger_rate / control_hz` per finger (0.2 per step). With the `agent`
+policy the LLM calls `move_by`, for example
+`{"hand_z": -0.1, "thumb_rotate": 1.0, "index_finger": 0.6, "thumb_bend": 0.6}`.
 
 Observations: one camera (`scene_cam`, OpenCV device `camera_device`), and
-state `hand_pos` (m), `grip` (0 to 1) and `arm_joints` (7, rad).
+state `hand_pos` (m), `fingers` (6, 0 to 1) and `arm_joints` (7, rad).
 
 ## How it moves the arm
 
@@ -45,8 +49,10 @@ state `hand_pos` (m), `grip` (0 to 1) and `arm_joints` (7, rad).
 ## Inspire hand
 
 RS485 at 115200 baud, Inspire's own frame protocol (manual V1.0.9, section
-2.2). Grip interpolates the six DoF between `open_angles` and
-`closed_angles` (raw 0 to 1000; 1000 is open). Reset sets the hand's speed
+2.2). Each finger control maps linearly between `open_angles` and
+`closed_angles` (raw 0 to 1000; the manual calls 1000 open). Which way the
+thumb rotation turns on the lent hand is unverified; swap its entries if
+it is backwards. Reset sets the hand's speed
 and force limits (`hand_speed_value`, `hand_force_value`, default 500 each).
 Set `hand=none` for a station without a hand.
 
@@ -56,7 +62,7 @@ Set `hand=none` for a station without a hand.
 - `home_pos` and the workspace box: depend on where the table is.
 - `firmware`: the Nero's firmware profile (`default`, `v111` to `v121`).
 - `hand_port`, `hand_id`: the lent unit's serial port and id.
-- `closed_angles`: a sensible fist or pinch for the task.
+- `closed_angles`: how far each motor may close, if the full range is too much.
 - `camera_device`: the station camera.
 
 ## Run
@@ -71,7 +77,7 @@ inspect-robots doctor --embodiment nero_inspire
 inspect-robots run --policy agent --embodiment nero_inspire \
     -E backend=kinematic -E unattended=true \
     -P model=anthropic/claude-opus-5-5 \
-    --instruction "move the hand down 10 cm and close it"
+    --instruction "move the hand down 10 cm and pinch with thumb and index finger"
 ```
 
 ## Develop

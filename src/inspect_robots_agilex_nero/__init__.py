@@ -1,7 +1,8 @@
 """Inspect Robots embodiment ``nero_inspire``: an AgileX Nero arm with an Inspire hand.
 
 Each action is a per-step hand displacement ``(hand_x, hand_y, hand_z)`` in
-metres in the arm base frame plus a grip change. Construction is inert;
+metres in the arm base frame plus a change in each of the hand's six
+finger motors. Construction is inert;
 backends connect on the first ``reset()``.
 """
 

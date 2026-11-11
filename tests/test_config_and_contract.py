@@ -18,9 +18,10 @@ from inspect_robots_agilex_nero.embodiment import _DOCS, NeroEmbodiment
 
 def test_defaults_bounds_and_hand_none() -> None:
     cfg = NeroConfig()
-    np.testing.assert_allclose(cfg.high, (0.02, 0.02, 0.02, 0.2))
+    np.testing.assert_allclose(cfg.high, (0.02, 0.02, 0.02, *([0.2] * 6)))
     np.testing.assert_allclose(cfg.low, -cfg.high)
-    assert NeroConfig(hand="none").high[3] == 0.0
+    np.testing.assert_allclose(NeroConfig(hand="none").high[3:], 0.0)
+    assert len(DIM_LABELS) == 9
 
 
 def test_flat_kwargs_are_coerced() -> None:
