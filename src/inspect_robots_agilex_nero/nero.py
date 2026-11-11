@@ -35,6 +35,9 @@ Vec = npt.NDArray[np.float64]
 
 #: Feedback older than this is refused (see ``PyAgxArmDriver._fresh``).
 FEEDBACK_STALE_S = 0.5
+#: pyAgxArm's internal CAN message groups behind the aggregate readings.
+JOINT_GROUPS = ("joint_12", "joint_34", "joint_56", "joint_7")
+POSE_GROUPS = ("end_pose_xy", "end_pose_zrx", "end_pose_ryrz")
 
 PYAGXARM_INSTALL = (
     'pip install "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm", '
@@ -226,9 +229,9 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
 
             sim = MujocoNero(cfg)
         else:
-            from inspect_robots_agilex_nero._isaaclab import IsaacLabNero
+            from inspect_robots_agilex_nero._isaaclab import shared_sim
 
-            sim = IsaacLabNero(cfg)
+            sim = shared_sim(cfg)
         return Backends(
             sim,
             sim if cfg.fingers_enabled else None,
@@ -316,26 +319,36 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             raise RuntimeError(f"Nero {what}: feedback is {now - stamp:.2f} s old")
         return message
 
-    def _check_each_joint(self) -> None:
-        """Refuse if any single joint's feedback is stale.
+    def _check_groups(self, groups: tuple[str, ...], what: str) -> None:
+        """Refuse unless every CAN message group behind an aggregate reading is fresh.
 
-        pyAgxArm's aggregate replies take their timestamp from the last joint
-        group to arrive, so one silent joint can hide behind fresh ones. Each
-        motor's own state reply (``get_motor_states(i)``) carries its own
-        timestamp; this checks all seven. Unverified on hardware.
+        pyAgxArm assembles ``get_joint_angles`` from groups ``joint_12``,
+        ``joint_34``, ``joint_56``, ``joint_7`` and ``get_flange_pose`` from
+        ``end_pose_xy``, ``end_pose_zrx``, ``end_pose_ryrz``, cached on its
+        internal ``_parser``; the aggregate's timestamp is only the last
+        group's, so one silent group could hide behind fresh ones. There is no
+        public per-group API, so this reads those internals (pyAgxArm master,
+        2026-11). If they are missing (a different pyAgxArm), every read is
+        refused, and hold() falls back to the electronic e-stop.
         """
-        for joint in range(1, 8):
-            self._fresh(self._robot.get_motor_states(joint), f"joint {joint}")
+        parser = getattr(self._robot, "_parser", None)
+        if parser is None:
+            raise RuntimeError(f"Nero {what}: cannot check per-group freshness (no _parser)")
+        for group in groups:
+            message = getattr(parser, group, None)
+            if message is None:
+                raise RuntimeError(f"Nero {what}: no {group} feedback received")
+            self._fresh(message, f"{what} ({group})")
 
     def read_flange(self) -> FlangePose:
-        """Measured flange pose from ``get_flange_pose``, if it and every joint are fresh."""
-        self._check_each_joint()
+        """Measured flange pose from ``get_flange_pose``, if every pose group is fresh."""
+        self._check_groups(POSE_GROUPS, "pose")
         pose = np.asarray(self._fresh(self._robot.get_flange_pose(), "pose"), dtype=np.float64)
         return FlangePose(pose[:3].copy(), pose[3:6].copy())
 
     def read_joints(self) -> Vec:
         """Measured joints from ``get_joint_angles``, if fresh."""
-        self._check_each_joint()
+        self._check_groups(JOINT_GROUPS, "joints")
         q = self._fresh(self._robot.get_joint_angles(), "joints")
         return np.asarray(q, dtype=np.float64)
 

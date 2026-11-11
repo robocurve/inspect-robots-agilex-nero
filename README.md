@@ -47,9 +47,10 @@ state `hand_pos` (m), `fingers` (6, 0 to 1) and `arm_joints` (7, rad).
   anything the hand must not touch.
 - The hand's orientation is held at whatever it was at reset.
 - The arm keeps driving to its last target by itself. If this process stops,
-  the arm finishes that move (at most `max_target_lead_m` away) and stays
-  there. Nothing on the host can stop it after that: keep the arm's own stop
-  within reach.
+  the arm finishes that move and stays there. That target was at most
+  `max_target_lead_m` from the measured hand when it was sent; the path to it
+  is the arm's own. Nothing on the host can stop it after that: keep the
+  arm's own stop within reach.
 - The operator confirms readiness before anything connects (connecting
   enables the arm). Reset then homes the hand under the same limits as any
   step, re-reading the hand each step, and opens the fingers. Reset and park

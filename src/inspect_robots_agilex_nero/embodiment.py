@@ -56,8 +56,11 @@ the thumb across first; a pinch uses thumb_rotate, thumb_bend and
 index_finger only. hand_pos in the state is the hand point (x, y, z) in
 metres from the arm's base, x forward, y left, z up. fingers is the measured
 closure of each of the six, in the same order. arm_joints are the seven joint
-angles in radians. The hand stays inside a box set for this station; a move
-past it stops at the edge, and hand_pos shows where the hand really is. A
+angles in radians. Hand targets stay inside a box set for this station and
+within a few centimetres of where the hand is; a move past the box stops at its
+edge, and hand_pos shows where the hand really is. Only targets are bounded:
+the arm plans its own path between them, which is not checked and can pass
+outside the box, so keep clear of obstacles near its edges. A
 move can be larger than one step's bound; it is split into steps. Fingers
 stop when they meet resistance, so a measured closure well below its command
 means the finger is pressing on something. If the finger bounds are zero
@@ -287,21 +290,47 @@ class NeroEmbodiment:
             )
 
     def _safe_target(self, proposed: Vec, hand: Vec) -> Vec:
-        """The proposed target, inside the box and within ``max_target_lead_m`` of the hand.
+        """The point nearest ``proposed`` that is in the box and within the lead of the hand.
 
-        Clamp to the box first, then pull the target back along the straight line
-        toward the measured hand until it is within the lead distance. While the
-        hand is inside the (convex) box that line stays inside it, so both limits
-        hold at once. A hand more than ``home_margin_m`` outside the box is a fault.
+        Both sets are convex. The exact projection onto their intersection is
+        ``clip((proposed + w * hand) / (1 + w))`` for the smallest ``w >= 0`` that
+        lands within the lead, found by bisection. A hand more than
+        ``home_margin_m`` outside the box, or too far from it for the two sets to
+        meet, is a fault rather than a silent violation of either limit.
         """
         self._check_start(hand)
-        target = np.clip(proposed, self._cfg.box_low, self._cfg.box_high)
-        offset = target - hand
-        distance = float(np.linalg.norm(offset))
+        low, high = self._cfg.box_low, self._cfg.box_high
         lead = self._cfg.max_target_lead_m
-        if distance > lead:
-            target = hand + offset * (lead / distance)
-        return np.asarray(target, dtype=np.float64)
+        gap = float(np.linalg.norm(np.clip(hand, low, high) - hand))
+        if gap >= lead - 1e-9:  # the sets do not meet with room to spare
+            raise RuntimeError(
+                f"the hand is {gap:.3f} m outside the workspace box, beyond the "
+                f"{lead} m target lead: no safe target exists"
+            )
+
+        proposed = np.asarray(proposed, dtype=np.float64)
+
+        def candidate(weight: float) -> Vec:
+            # The projection is clip((proposed + weight * hand) / (1 + weight)) for the
+            # smallest weight >= 0 that brings it within the lead (Lagrange multiplier
+            # of the ball constraint); its distance to the hand falls as weight grows.
+            blended = (proposed + weight * hand) / (1.0 + weight)
+            return np.asarray(np.clip(blended, low, high), dtype=np.float64)
+
+        point = candidate(0.0)
+        if float(np.linalg.norm(point - hand)) > lead:
+            below, above = 0.0, 1.0
+            while float(np.linalg.norm(candidate(above) - hand)) > lead:
+                # Terminates: as w grows the candidate tends to clip(hand), within the lead.
+                below, above = above, above * 2.0
+            for _ in range(80):
+                middle = 0.5 * (below + above)
+                if float(np.linalg.norm(candidate(middle) - hand)) > lead:
+                    below = middle
+                else:
+                    above = middle
+            point = candidate(above)
+        return point
 
     def _capped(self, delta: Vec) -> Vec:
         """A step no longer than ``hand_speed / control_hz`` in any direction."""
@@ -344,7 +373,10 @@ class NeroEmbodiment:
         period = 1.0 / self._cfg.control_hz
         deadline = self._clock() + self._cfg.home_timeout_s
         hand = self._hand_point()
+        # Replace whatever target the arm still has with where it is now, so an
+        # earlier move cannot carry on even if the hand is already near home.
         self._target = self._safe_target(hand, hand)
+        self._command_arm()
         while float(np.linalg.norm(home - hand)) > self._cfg.settle_tolerance_m:
             if self._clock() > deadline:
                 raise RuntimeError(

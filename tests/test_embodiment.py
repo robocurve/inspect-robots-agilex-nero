@@ -453,3 +453,40 @@ def test_park_refuses_from_far_outside_the_box() -> None:
     with pytest.raises(RuntimeError, match="outside the workspace box"):
         rig.emb.park()
     assert rig.arm.connected is False
+
+
+def test_targets_satisfy_both_limits_at_faces_edges_and_corners() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    emb, cfg = rig.emb, rig.cfg
+    low, high, lead = cfg.box_low, cfg.box_high, cfg.max_target_lead_m
+    rng = np.random.default_rng(0)
+    hands = [
+        np.asarray((0.585, 0.0, 0.20)),  # outside a face, within the margin
+        np.asarray((0.58, 0.37, 0.20)),  # outside an edge
+        np.asarray((0.57, 0.36, 0.52)),  # outside a corner
+        np.asarray((0.54, 0.34, 0.49)),  # inside, near a corner
+    ]
+    for hand in hands:
+        for proposed in [*rng.uniform(-1.0, 1.0, size=(50, 3)), np.asarray((0.55, 0.10, 0.20))]:
+            target = emb._safe_target(np.asarray(proposed, dtype=np.float64), hand)
+            assert np.all(target >= low - 1e-9) and np.all(target <= high + 1e-9)
+            assert np.linalg.norm(target - hand) <= lead + 1e-9
+    # Codex's reproduction: an outside hand and a proposal along the face.
+    target = emb._safe_target(np.asarray((0.55, 0.10, 0.20)), np.asarray((0.585, 0.0, 0.20)))
+    assert target[0] <= cfg.x_max + 1e-9
+    # Just outside the box but farther than the lead: no target satisfies both.
+    with pytest.raises(RuntimeError, match="no safe target exists"):
+        emb._safe_target(np.asarray((0.5, 0.0, 0.2)), np.asarray((0.595, 0.0, 0.20)))
+    emb.close()
+
+
+def test_park_near_home_still_replaces_the_outstanding_target() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    home = np.asarray(rig.cfg.home_pos)
+    rig.arm._position = home + np.asarray((0.005, 0.0, 0.0))  # within the settle tolerance
+    rig.arm._target = home + np.asarray((0.02, 0.0, 0.0))  # but still heading away
+    rig.emb.park()
+    np.testing.assert_allclose(rig.arm._target, rig.arm._position, atol=1e-9)
+    rig.emb.close()

@@ -48,6 +48,26 @@ def _launch_app() -> None:
         _APP = AppLauncher(headless=True, enable_cameras=True).app
 
 
+_SHARED: IsaacLabNero | None = None
+
+
+def shared_sim(cfg: NeroConfig) -> IsaacLabNero:
+    """The one Isaac Lab station for this process, reset to its start if it exists.
+
+    Isaac Lab's simulation context is a process-wide singleton, so a closed
+    embodiment cannot build a second scene at the same prim paths. The station
+    is built once and reused; a later connection resets it instead.
+    """
+    global _SHARED
+    if _SHARED is None:
+        _SHARED = IsaacLabNero(cfg)
+    else:
+        if _SHARED._cfg != cfg:
+            raise RuntimeError("Isaac Lab station already built with a different configuration")
+        _SHARED.reset_scene()
+    return _SHARED
+
+
 class IsaacLabNero:
     """Arm, hand, clock and camera over one Isaac Lab scene."""
 
@@ -276,7 +296,7 @@ class IsaacLabNero:
         self.stopped = True
 
     def disconnect(self) -> None:
-        """Nothing to release; the app stays up for the process."""
+        """Nothing to release: the station is reused by the next connection (``shared_sim``)."""
 
     # ------------------------------------------------------------------ HandDriver
 
