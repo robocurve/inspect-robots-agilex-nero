@@ -261,14 +261,18 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
     return Backends(arm, hand)
 
 
-class PyAgxArmDriver:  # pragma: no cover - hardware
-    """The real Nero over pyAgxArm. Calls follow pyAgxArm's docs; untested on hardware."""
+class PyAgxArmDriver:
+    """The real Nero over pyAgxArm, around a pyAgxArm robot object.
+
+    ``connect`` needs the hardware; everything else is tested with a fake robot.
+    Calls follow pyAgxArm's docs and source; untested on hardware.
+    """
 
     def __init__(self, robot: Any) -> None:
         self._robot = robot
 
     @classmethod
-    def connect(cls, cfg: NeroConfig) -> PyAgxArmDriver:
+    def connect(cls, cfg: NeroConfig) -> PyAgxArmDriver:  # pragma: no cover - hardware
         """Create, connect and enable the arm, and set its speed."""
         try:
             from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, create_agx_arm_config
@@ -297,7 +301,7 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
         return driver
 
     @staticmethod
-    def _fresh(reply: Any, what: str) -> Any:
+    def _fresh(reply: Any, what: str, *, check_rate: bool = True) -> Any:
         """The reply's message, refusing missing or stale feedback.
 
         pyAgxArm replies carry ``msg``, ``hz`` and ``timestamp``. The units of
@@ -309,7 +313,7 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
         if message is None:
             raise RuntimeError(f"Nero {what}: no feedback received")
         rate = getattr(reply, "hz", None)
-        if isinstance(rate, (int, float)) and rate <= 0:
+        if check_rate and isinstance(rate, (int, float)) and rate <= 0:
             raise RuntimeError(f"Nero {what}: feedback has stopped (0 Hz)")
         stamp = getattr(reply, "timestamp", None)
         if not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
@@ -338,7 +342,9 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             message = getattr(parser, group, None)
             if message is None:
                 raise RuntimeError(f"Nero {what}: no {group} feedback received")
-            self._fresh(message, f"{what} ({group})")
+            # The parser fills in each group's payload and timestamp but never its
+            # ``hz`` (that is tracked elsewhere and stays 0), so only the time counts.
+            self._fresh(message, f"{what} ({group})", check_rate=False)
 
     def read_flange(self) -> FlangePose:
         """Measured flange pose from ``get_flange_pose``, if every pose group is fresh."""

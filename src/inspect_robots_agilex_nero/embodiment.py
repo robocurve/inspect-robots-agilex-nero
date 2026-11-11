@@ -190,6 +190,9 @@ class NeroEmbodiment:
             self._sleep(1.0 / self._cfg.control_hz)
             self.num_steps += 1
             observation = self._observe()
+            # A hand that ended up well outside the box (a bad path, or pushed) is a
+            # fault now, not on the next action.
+            self._check_start(np.asarray(observation.state[HAND_KEY], dtype=np.float64))
             if not self._cfg.unattended and self._poll_end():
                 backends.arm.hold()
                 success = self._operator.confirm_success()

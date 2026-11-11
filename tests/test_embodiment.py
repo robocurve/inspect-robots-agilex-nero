@@ -490,3 +490,17 @@ def test_park_near_home_still_replaces_the_outstanding_target() -> None:
     rig.emb.park()
     np.testing.assert_allclose(rig.arm._target, rig.arm._position, atol=1e-9)
     rig.emb.close()
+
+
+def test_a_hand_that_ends_a_step_far_outside_the_box_is_a_fault() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+
+    def shove(position: Any, rpy: Any) -> None:
+        rig.arm._position = np.asarray((0.70, 0.0, 0.30))  # pushed, or a bad path
+        rig.arm._target = rig.arm._position.copy()
+
+    rig.arm.move_flange = shove  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        rig.emb.step(act(*([0.0] * 9)))
+    assert rig.arm.connected is False
