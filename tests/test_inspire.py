@@ -135,6 +135,14 @@ def test_hand_driver_configures_grips_and_reads() -> None:
     assert port.closed
 
 
+def test_a_short_serial_write_is_an_error() -> None:
+    port = FakePort()
+    port.write = lambda data: 3  # type: ignore[method-assign]
+    hand = InspireHand(port, hand_id=1, open_angles=OPEN, closed_angles=CLOSED)
+    with pytest.raises(RuntimeError, match="wrote 3 of"):
+        hand.read_fingers()
+
+
 def test_hand_driver_surfaces_nacks_and_short_replies() -> None:
     port = FakePort()
     hand = InspireHand(port, hand_id=1, open_angles=OPEN, closed_angles=CLOSED)

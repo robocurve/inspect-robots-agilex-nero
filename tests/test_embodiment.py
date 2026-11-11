@@ -65,19 +65,21 @@ def test_steps_move_the_hand_clamp_to_the_box_and_grip() -> None:
     rig = Rig()
     rig.emb.reset(SCENE)
     # x clamps to the 2 cm bound; the index finger to the 0.2 bound.
-    result = rig.emb.step(act(0.5, 0.0, -0.01, 0.0, 0.0, 0.0, 0.9, 0.15, -0.1))
-    np.testing.assert_allclose(result.observation.state[HAND_KEY], (0.37, 0.0, 0.29), atol=1e-9)
+    result = rig.emb.step(act(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9, 0.15, -0.1))
+    np.testing.assert_allclose(result.observation.state[HAND_KEY], (0.37, 0.0, 0.30), atol=1e-9)
     np.testing.assert_allclose(result.observation.state[FINGERS_KEY], (0, 0, 0, 0.2, 0.15, 0))
-    for _ in range(20):
+    for _ in range(30):
         result = rig.emb.step(act(0.02, 0.0, -0.02, *([0.2] * 6)))
     np.testing.assert_allclose(result.observation.state[HAND_KEY], (0.55, 0.0, 0.10), atol=1e-9)
     np.testing.assert_allclose(result.observation.state[FINGERS_KEY], 1.0)
-    assert rig.emb.num_steps == 21 and result.terminated is False
+    assert rig.emb.num_steps == 31 and result.terminated is False
+    # A malformed action holds the arm and closes; the next trial resets afresh.
     with pytest.raises(ValueError, match="9 values"):
         rig.emb.step(act(0.0, 0.0))
+    assert rig.emb._backends is None
+    rig.emb.reset(SCENE)
     with pytest.raises(ValueError, match="finite"):
         rig.emb.step(act(math.nan, *([0.0] * 8)))
-    rig.emb.close()
 
 
 def test_tcp_offset_is_applied_through_the_held_orientation() -> None:
@@ -180,7 +182,7 @@ def test_a_failing_step_holds_the_arm_and_closes() -> None:
     arm.faults["move"] = True
     with pytest.raises(RuntimeError, match="move failed"):
         rig.emb.step(act(0.01, *([0.0] * 8)))
-    assert arm.held == 2  # once on the failure, once in close
+    assert arm.held == 1  # close holds, then disconnects
     assert arm.connected is False
 
 
@@ -227,9 +229,11 @@ def test_dead_stdin_at_the_ready_prompt_is_a_fault() -> None:
         raise EOFError
 
     rig.emb._operator.input_fn = dead
+    connected: list[bool] = []
+    rig.emb._backend_factory = lambda cfg: connected.append(True)  # type: ignore[assignment,return-value]
     with pytest.raises(EmbodimentFault, match="stdin"):
         rig.emb.reset(SCENE)
-    assert rig.arm.connected is False
+    assert connected == []  # readiness comes before anything connects
 
 
 def test_unreachable_home_times_out() -> None:
@@ -265,7 +269,7 @@ class ReachDownAndGrip:
 
     def act(self, observation: Observation) -> ActionChunk:
         self.seen.append(observation.state[HAND_KEY].copy())
-        return ActionChunk(actions=[act(0.0, 0.01, -0.02, *([0.2] * 6))] * 5)
+        return ActionChunk(actions=[act(0.0, 0.0, -0.02, *([0.2] * 6))] * 5)
 
 
 def test_eval_reaches_down_and_grips(tmp_path: Path) -> None:
@@ -279,8 +283,8 @@ def test_eval_reaches_down_and_grips(tmp_path: Path) -> None:
     policy = ReachDownAndGrip(rig.cfg)
     logs = robots_eval(task, policy, rig.emb, sinks=[], seed=0, log_dir=str(tmp_path))
     assert logs[0].status == "success", logs[0].error
-    # After five steps the hand is 5 cm left and 10 cm lower.
-    np.testing.assert_allclose(policy.seen[1], (0.35, 0.05, 0.20), atol=1e-9)
+    # After five steps the hand is 10 cm lower.
+    np.testing.assert_allclose(policy.seen[1], (0.35, 0.0, 0.20), atol=1e-9)
     np.testing.assert_allclose(rig.hand.fingers, 1.0)  # type: ignore[union-attr]
     # eval() parks the arm afterwards: the hand glides home, still connected.
     np.testing.assert_allclose(rig.emb._hand_point(), rig.cfg.home_pos, atol=1e-9)
@@ -311,3 +315,195 @@ def test_a_simulator_backend_supplies_clock_sleep_and_camera() -> None:
     assert sim_clock.sleeps and frames  # paced and rendered by the simulator
     emb.close()
     assert emb._clock is not sim_clock and emb._camera_reader is None
+
+
+def test_speed_is_capped_in_every_direction_and_the_target_never_runs_ahead() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    start = rig.emb._hand_point()
+    result = rig.emb.step(act(0.02, 0.02, 0.02, *([0.0] * 6)))
+    moved = result.observation.state[HAND_KEY] - start
+    assert np.linalg.norm(moved) == pytest.approx(0.02)  # not 0.02 * sqrt(3)
+    # A blocked arm: the target stops 4 cm ahead of where the hand really is.
+    rig.arm._speed = 0.0
+    for _ in range(10):
+        rig.emb.step(act(0.02, *([0.0] * 8)))
+    lead = rig.emb._target - rig.emb._hand_point()
+    assert lead[0] == pytest.approx(rig.cfg.max_target_lead_m)
+    rig.emb.close()
+
+
+def test_reset_refuses_to_home_from_far_outside_the_box() -> None:
+    rig = Rig()
+    far = FlangePose(np.asarray((0.05, 0.0, 0.25)), np.asarray((math.pi, 0.0, 0.0)))
+    rig.arm = KinematicArm(clock=rig.clock, start=far)
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        rig.emb.reset(SCENE)
+    assert rig.arm.connected is False
+    # Just outside, within the margin: homes as usual.
+    near = FlangePose(np.asarray((0.17, 0.0, 0.25)), np.asarray((math.pi, 0.0, 0.0)))
+    rig2 = Rig()
+    rig2.arm = KinematicArm(clock=rig2.clock, start=near)
+    rig2.emb.reset(SCENE)
+    rig2.emb.close()
+
+
+def test_a_bad_action_or_a_failed_park_holds_and_closes() -> None:
+    rig = Rig()
+    arm = BrokenArm(rig.clock)
+    rig.arm = arm
+    rig.emb.reset(SCENE)
+    with pytest.raises(ValueError, match="finite"):
+        rig.emb.step(act(math.nan, *([0.0] * 8)))
+    assert arm.held == 1 and arm.connected is False
+    rig2 = Rig()
+    arm2 = BrokenArm(rig2.clock)
+    rig2.arm = arm2
+    rig2.emb.reset(SCENE)
+    rig2.emb.step(act(0.02, *([0.0] * 8)))  # away from home, so park has to move
+    arm2.faults["move"] = True
+    with pytest.raises(RuntimeError, match="move failed"):
+        rig2.emb.park()
+    assert arm2.held == 1 and arm2.connected is False
+
+
+def test_hand_pos_uses_the_measured_orientation() -> None:
+    rig = Rig(tcp_offset=(0.0, 0.0, 0.1))
+    rig.emb.reset(SCENE)
+    rig.arm._rpy = np.zeros(3)  # the wrist turned: the offset now points up, not down
+    flange = rig.arm.read_flange().position
+    np.testing.assert_allclose(
+        rig.emb._hand_point(), flange + np.asarray((0.0, 0.0, 0.1)), atol=1e-12
+    )
+    rig.emb.close()
+
+
+def test_a_simulator_scene_is_reset_on_every_later_reset() -> None:
+    from inspect_robots_agilex_nero.nero import Backends
+
+    rig = Rig()
+    resets: list[int] = []
+    rig.emb._backend_factory = lambda cfg: Backends(  # type: ignore[assignment]
+        rig.arm, rig.hand, reset_scene=lambda: resets.append(1)
+    )
+    rig.emb.reset(SCENE)
+    assert resets == []
+    rig.emb.reset(SCENE)
+    assert resets == [1]
+    rig.emb.close()
+
+
+def test_simulator_backends_get_the_station_settings_unless_overridden() -> None:
+    from inspect_robots_agilex_nero.embodiment import NeroEmbodiment
+    from inspect_robots_agilex_nero.sim_layout import SIM_DOCS, TCP_OFFSET
+
+    emb = NeroEmbodiment(backend="mujoco", mujoco_scene="x.xml", z_max="0.35")
+    assert emb._cfg.tcp_offset == TCP_OFFSET and emb._cfg.z_min == 0.005
+    assert emb._cfg.z_max == 0.35  # explicit settings win
+    assert SIM_DOCS in (emb.info.docs or "")
+    assert NeroEmbodiment(backend="kinematic")._cfg.tcp_offset == (0.0, 0.0, 0.0)
+
+
+def test_targets_stay_in_the_box_and_within_a_lead_ball_of_the_hand() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    emb = rig.emb
+    lead = rig.cfg.max_target_lead_m
+    hand = np.asarray((0.40, 0.0, 0.20))
+    # Far diagonal proposal: pulled back to the lead distance (a ball, not a cube).
+    target = emb._safe_target(hand + 1.0, hand)
+    assert np.linalg.norm(target - hand) == pytest.approx(lead)
+    # Near the box edge: the target stays inside the box.
+    edge = np.asarray((0.54, 0.0, 0.20))
+    target = emb._safe_target(edge + np.asarray((0.5, 0.0, 0.0)), edge)
+    assert target[0] == pytest.approx(rig.cfg.x_max)
+    # A hand just outside the box (within the margin) is pulled back toward it.
+    outside = np.asarray((0.58, 0.0, 0.20))
+    target = emb._safe_target(outside, outside)
+    assert target[0] < outside[0]
+    # A hand far outside the box is a fault, not a silent clamp.
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        emb._safe_target(hand, np.asarray((0.65, 0.0, 0.20)))
+    emb.close()
+
+
+def test_homing_respects_the_lead_and_one_deadline() -> None:
+    rig = Rig(home_timeout_s=2.0)
+    rig.arm = KinematicArm(clock=rig.clock, speed_m_s=0.0)  # a blocked arm
+    leads: list[float] = []
+    original = rig.arm.move_flange
+
+    def record(position: Any, rpy: Any) -> None:
+        hand = rig.arm.read_flange().position
+        leads.append(float(np.linalg.norm(np.asarray(position) - hand)))
+        original(position, rpy)
+
+    rig.arm.move_flange = record  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="did not reach home"):
+        rig.emb.reset(SCENE)
+    assert leads and max(leads) <= rig.cfg.max_target_lead_m + 1e-12
+    assert rig.clock.now - 100.0 <= 2.0 + 0.2 + 1e-9  # one deadline for the whole move
+
+
+def test_park_refuses_from_far_outside_the_box() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    rig.arm._position = np.asarray((0.05, 0.0, 0.25))  # pushed away by hand
+    rig.arm._target = rig.arm._position.copy()
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        rig.emb.park()
+    assert rig.arm.connected is False
+
+
+def test_targets_satisfy_both_limits_at_faces_edges_and_corners() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    emb, cfg = rig.emb, rig.cfg
+    low, high, lead = cfg.box_low, cfg.box_high, cfg.max_target_lead_m
+    rng = np.random.default_rng(0)
+    hands = [
+        np.asarray((0.585, 0.0, 0.20)),  # outside a face, within the margin
+        np.asarray((0.58, 0.37, 0.20)),  # outside an edge
+        np.asarray((0.57, 0.36, 0.52)),  # outside a corner
+        np.asarray((0.54, 0.34, 0.49)),  # inside, near a corner
+    ]
+    for hand in hands:
+        for proposed in [*rng.uniform(-1.0, 1.0, size=(50, 3)), np.asarray((0.55, 0.10, 0.20))]:
+            target = emb._safe_target(np.asarray(proposed, dtype=np.float64), hand)
+            assert np.all(target >= low - 1e-9) and np.all(target <= high + 1e-9)
+            assert np.linalg.norm(target - hand) <= lead + 1e-9
+    # Codex's reproduction: an outside hand and a proposal along the face.
+    target = emb._safe_target(np.asarray((0.55, 0.10, 0.20)), np.asarray((0.585, 0.0, 0.20)))
+    assert target[0] <= cfg.x_max + 1e-9
+    # Just outside the box but farther than the lead: no target satisfies both.
+    with pytest.raises(RuntimeError, match="no safe target exists"):
+        emb._safe_target(np.asarray((0.5, 0.0, 0.2)), np.asarray((0.595, 0.0, 0.20)))
+    emb.close()
+
+
+def test_park_near_home_still_replaces_the_outstanding_target() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+    home = np.asarray(rig.cfg.home_pos)
+    rig.arm._position = home + np.asarray((0.005, 0.0, 0.0))  # within the settle tolerance
+    rig.arm._target = home + np.asarray((0.02, 0.0, 0.0))  # but still heading away
+    rig.emb.park()
+    np.testing.assert_allclose(rig.arm._target, rig.arm._position, atol=1e-9)
+    rig.emb.close()
+
+
+def test_a_hand_that_ends_a_step_far_outside_the_box_is_a_fault() -> None:
+    rig = Rig()
+    rig.emb.reset(SCENE)
+
+    def shove(position: Any, rpy: Any) -> None:
+        rig.arm._position = np.asarray((0.70, 0.0, 0.30))  # pushed, or a bad path
+        rig.arm._target = rig.arm._position.copy()
+
+    rig.arm.move_flange = shove  # type: ignore[method-assign]
+    frames: list[int] = []
+    rig.emb._camera_reader = lambda: frames.append(1) or rig.frame  # type: ignore[assignment,func-returns-value]
+    with pytest.raises(RuntimeError, match="outside the workspace box"):
+        rig.emb.step(act(*([0.0] * 9)))
+    assert rig.arm.connected is False
+    assert frames == []  # faulted before touching the camera

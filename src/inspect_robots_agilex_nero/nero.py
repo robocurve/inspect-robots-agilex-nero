@@ -17,6 +17,7 @@ radians, fixed-axis roll-pitch-yaw) is assumed from it.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
@@ -31,6 +32,37 @@ from inspect_robots_agilex_nero.config import NeroConfig
 from inspect_robots_agilex_nero.inspire import InspireHand, open_inspire
 
 Vec = npt.NDArray[np.float64]
+
+#: Feedback older than this is refused (see ``PyAgxArmDriver._fresh``).
+FEEDBACK_STALE_S = 0.5
+
+
+def stamp_clock(stamp: Any) -> str | None:
+    """Which clock a pyAgxArm timestamp appears to use: ``"wall"``, ``"monotonic"`` or None.
+
+    Seconds since the epoch are over 1e9; anything smaller and positive is read
+    as seconds on the monotonic clock. Unverified on hardware: the read-only
+    check (``inspect-robots-nero-check``) prints what the arm actually sends.
+    """
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return None
+    if not math.isfinite(stamp) or stamp <= 0:
+        return None
+    return "wall" if stamp > 1e9 else "monotonic"
+
+
+def stamp_age(stamp: Any) -> float | None:
+    """Seconds since ``stamp`` on the clock it appears to use (negative if ahead)."""
+    clock = stamp_clock(stamp)
+    if clock is None:
+        return None
+    now = time.time() if clock == "wall" else time.monotonic()
+    return float(now - float(stamp))
+
+
+#: pyAgxArm's internal CAN message groups behind the aggregate readings.
+JOINT_GROUPS = ("joint_12", "joint_34", "joint_56", "joint_7")
+POSE_GROUPS = ("end_pose_xy", "end_pose_zrx", "end_pose_ryrz")
 
 PYAGXARM_INSTALL = (
     'pip install "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm", '
@@ -206,6 +238,8 @@ class Backends:
     clock: Callable[[], float] | None = None
     sleep: Callable[[float], None] | None = None
     camera: Callable[[], npt.NDArray[np.uint8]] | None = None
+    #: Put the simulated scene (robot, objects, time) back to its start state.
+    reset_scene: Callable[[], None] | None = None
 
 
 BackendFactory = Callable[[NeroConfig], Backends]
@@ -220,15 +254,16 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
 
             sim = MujocoNero(cfg)
         else:
-            from inspect_robots_agilex_nero._isaaclab import IsaacLabNero
+            from inspect_robots_agilex_nero._isaaclab import shared_sim
 
-            sim = IsaacLabNero(cfg)
+            sim = shared_sim(cfg)
         return Backends(
             sim,
             sim if cfg.fingers_enabled else None,
             clock=sim.sim_time,
             sleep=sim.advance,
             camera=sim.read_frame,
+            reset_scene=sim.reset_scene,
         )
     if cfg.backend == "kinematic":
         return Backends(
@@ -243,19 +278,27 @@ def default_backend_factory(cfg: NeroConfig) -> Backends:  # pragma: no cover - 
             )
             hand.configure(cfg.hand_speed_value, cfg.hand_force_value)
         except BaseException:
-            arm.disconnect()
+            # Clean up whatever opened: hold the arm, close the hand port, disconnect.
+            for cleanup in (arm.hold, *((hand.close,) if hand is not None else ()), arm.disconnect):
+                with contextlib.suppress(BaseException):
+                    cleanup()
             raise
     return Backends(arm, hand)
 
 
-class PyAgxArmDriver:  # pragma: no cover - hardware
-    """The real Nero over pyAgxArm. Calls follow pyAgxArm's docs; untested on hardware."""
+class PyAgxArmDriver:
+    """The real Nero over pyAgxArm, around a pyAgxArm robot object.
 
-    def __init__(self, robot: Any) -> None:
+    ``connect`` needs the hardware; everything else is tested with a fake robot.
+    Calls follow pyAgxArm's docs and source; untested on hardware.
+    """
+
+    def __init__(self, robot: Any, *, stale_s: float = FEEDBACK_STALE_S) -> None:
         self._robot = robot
+        self._stale_s = stale_s
 
     @classmethod
-    def connect(cls, cfg: NeroConfig) -> PyAgxArmDriver:
+    def connect(cls, cfg: NeroConfig) -> PyAgxArmDriver:  # pragma: no cover - hardware
         """Create, connect and enable the arm, and set its speed."""
         try:
             from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, create_agx_arm_config
@@ -266,36 +309,102 @@ class PyAgxArmDriver:  # pragma: no cover - hardware
             robot=ArmModel.NERO, firmeware_version=firmware, channel=cfg.can_channel
         )
         robot = AgxArmFactory.create_arm(config)
-        robot.connect()
-        deadline = time.monotonic() + cfg.enable_timeout_s
-        while not robot.enable(255):
-            if time.monotonic() > deadline:
-                robot.disconnect()
-                raise RuntimeError("Nero did not enable; check power, CAN and firmware profile")
-            time.sleep(0.05)
-        robot.set_speed_percent(cfg.speed_percent)
-        return cls(robot)
+        driver = cls(robot, stale_s=cfg.feedback_stale_s)
+        try:
+            robot.connect()
+            deadline = time.monotonic() + cfg.enable_timeout_s
+            while not robot.enable(255):
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Nero did not enable; check power, CAN and firmware profile")
+                time.sleep(0.05)
+            robot.set_speed_percent(cfg.speed_percent)
+        except BaseException:
+            # The arm may already be enabled: stop it (hold, or the e-stop) before letting go.
+            for cleanup in (driver.hold, robot.disconnect):
+                with contextlib.suppress(BaseException):
+                    cleanup()
+            raise
+        return driver
 
-    @staticmethod
-    def _message(reply: Any) -> Any:
-        return getattr(reply, "msg", reply)
+    def _fresh(self, reply: Any, what: str, *, check_rate: bool = True) -> Any:
+        """The reply's message, refusing missing or stale feedback.
+
+        pyAgxArm replies carry ``msg``, ``hz`` and ``timestamp``. The units of
+        ``timestamp`` are unverified on hardware: it is checked against wall
+        time when it looks like an epoch time and against the monotonic clock
+        otherwise. A rate of zero means the feed has stopped.
+        """
+        message = getattr(reply, "msg", reply)
+        if message is None:
+            raise RuntimeError(f"Nero {what}: no feedback received")
+        rate = getattr(reply, "hz", None)
+        if check_rate and isinstance(rate, (int, float)) and rate <= 0:
+            raise RuntimeError(f"Nero {what}: feedback has stopped (0 Hz)")
+        stamp = getattr(reply, "timestamp", None)
+        age = stamp_age(stamp)
+        if age is None:
+            raise RuntimeError(f"Nero {what}: feedback has no valid timestamp ({stamp!r})")
+        if age > self._stale_s:
+            raise RuntimeError(f"Nero {what}: feedback is {age:.2f} s old")
+        if -age > self._stale_s:
+            # From the future: the clock moved, so age cannot be trusted.
+            raise RuntimeError(f"Nero {what}: feedback timestamp is {-age:.2f} s ahead")
+        return message
+
+    def _check_groups(self, groups: tuple[str, ...], what: str) -> None:
+        """Refuse unless every CAN message group behind an aggregate reading is fresh.
+
+        pyAgxArm assembles ``get_joint_angles`` from groups ``joint_12``,
+        ``joint_34``, ``joint_56``, ``joint_7`` and ``get_flange_pose`` from
+        ``end_pose_xy``, ``end_pose_zrx``, ``end_pose_ryrz``, cached on its
+        internal ``_parser``; the aggregate's timestamp is only the last
+        group's, so one silent group could hide behind fresh ones. There is no
+        public per-group API, so this reads those internals (pyAgxArm master,
+        2026-11). If they are missing (a different pyAgxArm), every read is
+        refused, and hold() falls back to the electronic e-stop.
+        """
+        parser = getattr(self._robot, "_parser", None)
+        if parser is None:
+            raise RuntimeError(f"Nero {what}: cannot check per-group freshness (no _parser)")
+        for group in groups:
+            message = getattr(parser, group, None)
+            if message is None:
+                raise RuntimeError(f"Nero {what}: no {group} feedback received")
+            # The parser fills in each group's payload and timestamp but never its
+            # ``hz`` (that is tracked elsewhere and stays 0), so only the time counts.
+            self._fresh(message, f"{what} ({group})", check_rate=False)
 
     def read_flange(self) -> FlangePose:
-        """Measured flange pose from ``get_flange_pose``."""
-        pose = np.asarray(self._message(self._robot.get_flange_pose()), dtype=np.float64)
+        """Measured flange pose from ``get_flange_pose``, if every pose group is fresh."""
+        self._check_groups(POSE_GROUPS, "pose")
+        pose = np.asarray(self._fresh(self._robot.get_flange_pose(), "pose"), dtype=np.float64)
         return FlangePose(pose[:3].copy(), pose[3:6].copy())
 
     def read_joints(self) -> Vec:
-        """Measured joints from ``get_joint_angles``."""
-        return np.asarray(self._message(self._robot.get_joint_angles()), dtype=np.float64)
+        """Measured joints from ``get_joint_angles``, if fresh."""
+        self._check_groups(JOINT_GROUPS, "joints")
+        q = self._fresh(self._robot.get_joint_angles(), "joints")
+        return np.asarray(q, dtype=np.float64)
 
     def move_flange(self, position: Vec, rpy: Vec) -> None:
         """Planned move to the flange pose with ``move_p``."""
         self._robot.move_p([*map(float, position), *map(float, rpy)])
 
     def hold(self) -> None:
-        """Re-target the measured joints with ``move_j`` so the arm stops in place."""
-        self._robot.move_j([float(q) for q in self.read_joints()])
+        """Re-target the measured joints so the arm stops in place.
+
+        Without fresh, finite joint feedback there is nothing safe to hold, so
+        this falls back to the electronic e-stop (a slow damped descent) rather
+        than sending old joint angles. It never disables the motors.
+        """
+        try:
+            q = self.read_joints()
+            if q.shape != (7,) or not np.all(np.isfinite(q)):
+                raise RuntimeError(f"Nero joints: invalid feedback {q!r}")
+            self._robot.move_j([float(v) for v in q])
+        except Exception as exc:
+            self._robot.electronic_emergency_stop()
+            raise RuntimeError("could not hold on fresh joint feedback; used the e-stop") from exc
 
     def emergency_stop(self) -> None:
         """``electronic_emergency_stop``: slow damped descent."""

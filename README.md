@@ -33,18 +33,36 @@ state `hand_pos` (m), `fingers` (6, 0 to 1) and `arm_joints` (7, rad).
 
 ## How it moves the arm
 
-- The embodiment owns the hand target. Each step adds its displacement and
-  clamps to a workspace box (`x_min` to `z_max`), then sends the matching
-  flange pose to the arm's own planner (pyAgxArm `move_p`). The hand point is
-  `tcp_offset` from the flange, set by the Inspire mount.
+- The embodiment owns the hand target. Each step moves it by at most
+  `hand_speed / control_hz` in any direction, keeps it inside a workspace box
+  (`x_min` to `z_max`), and keeps it within `max_target_lead_m` (4 cm) of the
+  measured hand. It then sends the matching flange pose to the arm's own
+  planner (pyAgxArm `move_p`). The hand point is `tcp_offset` from the
+  flange, set by the Inspire mount.
+- `hand_speed` limits how fast the target advances, not how fast the arm
+  moves: each short move runs at the arm's own `speed_percent`, so set that low
+  for a first run. The box constrains targets only. `move_p` plans in joint
+  space and nothing here checks the swept path, so a move can leave the box in
+  between targets (more so near a singularity); keep the box well inside
+  anything the hand must not touch.
 - The hand's orientation is held at whatever it was at reset.
-- The arm holds its last target by itself, so there is no streaming deadline:
-  a slow policy or a dead process leaves the arm still.
-- Reset glides the hand to `home_pos` at hand speed and opens the fingers.
-- Close holds the arm where it is and closes the connections. Nothing in
-  this package calls pyAgxArm `disable()` or `reset()`, which drop raised
-  joints. `emergency_stop()` uses the arm's electronic e-stop, which lowers it
-  slowly with damping.
+- The arm keeps driving to its last target by itself. If this process stops,
+  the arm finishes that move and stays there. That target was at most
+  `max_target_lead_m` from the measured hand when it was sent; the path to it
+  is the arm's own. Nothing on the host can stop it after that: keep the
+  arm's own stop within reach.
+- The operator confirms readiness before anything connects (connecting
+  enables the arm). Reset then homes the hand under the same limits as any
+  step, re-reading the hand each step, and opens the fingers. Reset and park
+  refuse to move a hand that is more than `home_margin_m` outside the box, and
+  a step faults if the hand ends up there.
+- Any failure (a malformed action, lost feedback, a failed park) holds the arm
+  and closes. Hold re-targets the measured joints, after checking that each
+  joint's own feedback is fresh; if it cannot (stale or missing feedback, or
+  the hold command fails), it uses the arm's electronic e-stop instead, which
+  lowers it slowly with damping. A failed startup does the same before
+  disconnecting. Nothing in this package
+  calls pyAgxArm `disable()` or `reset()`, which drop raised joints.
 
 ## Inspire hand
 
@@ -62,7 +80,9 @@ Two simulator backends run the same embodiment on the same station, defined
 once in `sim_layout.py`: the Nero from AgileX's `agx_arm_urdf` (MIT) with the
 right Inspire DFQ hand from Unitree's `unitree_ros` (BSD-3) on a guessed 3 cm
 mount, a table at z = 0 with a red 4 cm block and a blue 5 cm block, and a
-fixed scene camera. `sim_layout.SIM_SETTINGS` holds the run settings both use
+fixed scene camera. `sim_layout.SIM_SETTINGS` holds the run settings both use,
+applied automatically for `backend=mujoco` and `backend=isaaclab` (anything
+you pass explicitly wins), and every reset after the first resets the scene
 (hand point, home, workspace box), so a trial means the same thing in either.
 The vendor models are not shipped; build from your own checkouts:
 
@@ -101,6 +121,25 @@ fingers forward, because the Nero's wrist bends only about 45 degrees.
 Nothing here has run on the physical arm yet. Please go step by step and send
 us the output of each step.
 
+0. **Read-only check, before anything can move.** With the arm powered and
+   resting, CAN up, on the machine wired to it:
+
+   ```bash
+   inspect-robots-nero-check -E can_channel=can0 -E firmware=<profile> \
+       -E hand_port=/dev/ttyUSB0 -E hand_id=<id> -E camera_device=<device>
+   ```
+
+   It connects to the arm without enabling it (so nothing can move), listens
+   for two seconds, and prints each feedback group the adapter relies on:
+   whether it arrived, its raw timestamp, which clock it seems to use and its
+   age, and whether the adapter will accept it. It also reads the hand's
+   finger angles (no writes) and one camera frame, and ends with READY or NOT
+   READY. Why: when the adapter cannot trust the arm's feedback, it stops the
+   arm with the electronic e-stop, which lowers it slowly. A NOT READY here
+   (a missing group, a different timestamp unit) is a small fix to make before
+   the arm moves. If the feedback is fine but slower than expected, raise
+   `feedback_stale_s` (default 0.5 s). On firmware 1.11 or older the arm may
+   send no feedback until switched to normal mode, which this check does not do.
 1. Bring up CAN and set `firmware` to the arm's profile. Measure and set
    `tcp_offset` (flange to the point you want to steer, through the mount),
    then `home_pos` and the workspace box for the table.
@@ -135,7 +174,8 @@ inspect-robots run --policy agent --embodiment nero_inspire \
 
 ```bash
 export UV_CACHE_DIR=$PWD/.uv-cache
-uv venv && uv pip install -e ".[dev]"
+uv sync --locked --extra dev
+uv run pre-commit install    # lint, format and types on commit; tests on push
 .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest --cov
 ```
 

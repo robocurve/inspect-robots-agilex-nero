@@ -54,6 +54,7 @@ def test_flat_kwargs_are_coerced() -> None:
         ({"firmware": "v2"}, "firmware must be"),
         ({"control_hz": 0}, "control_hz must be"),
         ({"x_min": 0.9}, "x_min must be below x_max"),
+        ({"x_max": float("inf")}, "must be finite"),
         ({"home_pos": (0.3, 0.0)}, "three values"),
         ({"tcp_offset": (0.0, float("nan"), 0.0)}, "finite"),
         ({"home_pos": (0.9, 0.0, 0.3)}, "inside the workspace"),
@@ -100,3 +101,27 @@ def test_entry_point_and_public_api() -> None:
     assert isinstance(emb, NeroEmbodiment)
     assert np.asarray(emb.info.action_space.high)[0] == pytest.approx(0.01)
     assert "NeroEmbodiment" in package.__all__
+
+
+def test_runtime_requirements_and_device_slots() -> None:
+    from inspect_robots.conformance import device_slots, missing_runtime_requirements
+
+    assert set(NeroEmbodiment.RUNTIME_REQUIREMENTS) == {"pyAgxArm", "serial", "cv2"}
+    assert (
+        "git+https://github.com/agilexrobotics/pyAgxArm"
+        in (NeroEmbodiment.RUNTIME_REQUIREMENTS["pyAgxArm"])
+    )
+    assert "pyAgxArm" in missing_runtime_requirements(NeroEmbodiment)
+    slots = {slot.arg: slot.kind for slot in device_slots(NeroEmbodiment)}
+    assert slots == {"can_channel": "can", "hand_port": "serial", "camera_device": "v4l2"}
+    fields = set(NeroConfig.__dataclass_fields__)
+    assert set(slots) <= fields
+
+
+def test_from_kwargs_is_the_backend_aware_constructor() -> None:
+    from inspect_robots_agilex_nero.sim_layout import TCP_OFFSET
+
+    sim = NeroConfig.from_kwargs(backend="isaaclab", home_pos="0.5,0.0,0.25")
+    assert sim.tcp_offset == TCP_OFFSET and sim.home_pos == (0.5, 0.0, 0.25)
+    assert NeroConfig(backend="mujoco").tcp_offset == (0.0, 0.0, 0.0)  # direct: hardware defaults
+    assert NeroConfig.from_kwargs(backend="kinematic").tcp_offset == (0.0, 0.0, 0.0)

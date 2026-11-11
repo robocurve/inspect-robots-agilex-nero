@@ -92,7 +92,15 @@ class NeroConfig:
     speed_percent: int = 20
     enable_timeout_s: float = 5.0
     settle_tolerance_m: float = 0.01
+    #: Arm feedback older than this (seconds) is treated as stale; see the README.
+    feedback_stale_s: float = 0.5
     home_timeout_s: float = 15.0
+    #: How far the hand target may run ahead of the measured hand point. If the
+    #: arm lags or is blocked, the target stops advancing, so the arm never has
+    #: a distant target to catch up to (or keep driving to if this process dies).
+    max_target_lead_m: float = 0.04
+    #: Reset only homes automatically from at most this far outside the box.
+    home_margin_m: float = 0.05
     # Inspire RH56 hand (RS485, Inspire frame protocol).
     hand: str = "inspire"
     hand_port: str = "/dev/ttyUSB0"
@@ -128,10 +136,15 @@ class NeroConfig:
             "finger_rate",
             "enable_timeout_s",
             "settle_tolerance_m",
+            "feedback_stale_s",
             "home_timeout_s",
+            "max_target_lead_m",
+            "home_margin_m",
         ):
             _require_positive(name, getattr(self, name))
         for low, high in (("x_min", "x_max"), ("y_min", "y_max"), ("z_min", "z_max")):
+            if not (math.isfinite(getattr(self, low)) and math.isfinite(getattr(self, high))):
+                raise ValueError(f"{low} and {high} must be finite")
             if not getattr(self, low) < getattr(self, high):
                 raise ValueError(f"{low} must be below {high}")
         if len(self.home_pos) != 3 or len(self.tcp_offset) != 3:
@@ -161,7 +174,17 @@ class NeroConfig:
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> Self:
-        """Build from CLI-style kwargs, coercing strings and rejecting unknown keys."""
+        """Build from CLI-style kwargs, coercing strings and rejecting unknown keys.
+
+        This is the backend-aware constructor: for ``mujoco`` and ``isaaclab`` it
+        starts from the simulated station's settings (``sim_layout.SIM_SETTINGS``
+        and its notes), under anything given explicitly. ``NeroConfig(...)``
+        called directly always starts from the hardware defaults.
+        """
+        if str(kwargs.get("backend", "")).strip() in ("mujoco", "isaaclab"):
+            from inspect_robots_agilex_nero.sim_layout import SIM_DOCS, SIM_SETTINGS
+
+            kwargs = {**SIM_SETTINGS, "docs_extra": SIM_DOCS, **kwargs}
         known = {item.name for item in fields(cls)}
         unknown = sorted(set(kwargs) - known)
         if unknown:

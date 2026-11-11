@@ -143,7 +143,9 @@ class InspireHand:
     def _exchange(self, request: bytes, command: int, address: int, data_len: int) -> bytes:
         with self._lock:
             self._port.reset_input_buffer()
-            self._port.write(request)
+            written = self._port.write(request)
+            if written is not None and written != len(request):
+                raise RuntimeError(f"Inspire hand: wrote {written} of {len(request)} bytes")
             frame = self._port.read(8 + data_len)
         data = parse_response(frame, self._id, command, address)
         if len(data) != data_len:
@@ -191,5 +193,7 @@ def open_inspire(  # pragma: no cover - hardware
         raise ModuleNotFoundError(
             'The Inspire hand needs pyserial: pip install "inspect-robots-agilex-nero[hardware]"'
         ) from exc
-    link = serial.Serial(port, baud, bytesize=8, parity="N", stopbits=1, timeout=0.1)
+    link = serial.Serial(
+        port, baud, bytesize=8, parity="N", stopbits=1, timeout=0.1, write_timeout=0.1
+    )
     return InspireHand(link, hand_id=hand_id, open_angles=open_angles, closed_angles=closed_angles)

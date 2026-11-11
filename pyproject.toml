@@ -45,6 +45,9 @@ dev = [
 Homepage = "https://github.com/robocurve/inspect-robots-agilex-nero"
 Framework = "https://github.com/robocurve/inspect-robots"
 
+[project.scripts]
+inspect-robots-nero-check = "inspect_robots_agilex_nero.check:main"
+
 [project.entry-points."inspect_robots.embodiments"]
 nero_inspire = "inspect_robots_agilex_nero.embodiment:NeroEmbodiment"
 

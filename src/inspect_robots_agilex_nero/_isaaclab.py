@@ -48,6 +48,26 @@ def _launch_app() -> None:
         _APP = AppLauncher(headless=True, enable_cameras=True).app
 
 
+_SHARED: IsaacLabNero | None = None
+
+
+def shared_sim(cfg: NeroConfig) -> IsaacLabNero:
+    """The one Isaac Lab station for this process, reset to its start if it exists.
+
+    Isaac Lab's simulation context is a process-wide singleton, so a closed
+    embodiment cannot build a second scene at the same prim paths. The station
+    is built once and reused; a later connection resets it instead.
+    """
+    global _SHARED
+    if _SHARED is None:
+        _SHARED = IsaacLabNero(cfg)
+    else:
+        if _SHARED._cfg != cfg:
+            raise RuntimeError("Isaac Lab station already built with a different configuration")
+        _SHARED.reset_scene()
+    return _SHARED
+
+
 class IsaacLabNero:
     """Arm, hand, clock and camera over one Isaac Lab scene."""
 
@@ -181,12 +201,34 @@ class IsaacLabNero:
         self._finger_cmd = np.zeros(len(leaders), dtype=np.float64)
         self._sim_time = 0.0
         self.stopped = False
-        # Servo to the start pose: hand a little above home, palm down.
+        self._go_to_start()
+
+    def _go_to_start(self) -> None:
+        """Servo to the start pose: hand a little above home, palm down."""
+        cfg = self._cfg
         start_rpy = matrix_rpy(start_rotation())
         offset = rpy_matrix(start_rpy) @ np.asarray(cfg.tcp_offset)
         start = np.asarray(cfg.home_pos) + np.asarray((0.0, 0.0, 0.05)) - offset
         self.move_flange(start, start_rpy)
         self.advance(2.0)
+
+    def reset_scene(self) -> None:
+        """Put the robot and blocks back to their start state and re-home."""
+        torch = self._torch
+        robot = self._robot
+        robot.write_joint_state_to_sim(
+            robot.data.default_joint_pos.clone(), torch.zeros_like(robot.data.default_joint_vel)
+        )
+        for block in BLOCKS:
+            body = self._scene[block.name]
+            state = body.data.default_root_state.clone()
+            state[:, :3] += self._scene.env_origins
+            body.write_root_state_to_sim(state)
+        self._scene.reset()
+        self._finger_cmd = np.zeros_like(self._finger_cmd)
+        self._targets = robot.data.default_joint_pos.clone()
+        self.stopped = False
+        self._go_to_start()
 
     # ------------------------------------------------------------------ time
 
@@ -254,7 +296,7 @@ class IsaacLabNero:
         self.stopped = True
 
     def disconnect(self) -> None:
-        """Nothing to release; the app stays up for the process."""
+        """Nothing to release: the station is reused by the next connection (``shared_sim``)."""
 
     # ------------------------------------------------------------------ HandDriver
 

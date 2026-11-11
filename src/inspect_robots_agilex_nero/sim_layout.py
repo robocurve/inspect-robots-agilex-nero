@@ -93,6 +93,12 @@ def start_rotation() -> Vec:
 def matrix_rpy(rotation: npt.ArrayLike) -> Vec:
     """Fixed-axis roll, pitch, yaw of a rotation matrix (inverse of ``rpy_matrix``)."""
     r = np.asarray(rotation, dtype=np.float64)
+    if abs(float(r[2, 0])) > 1.0 - 1e-9:
+        # Gimbal lock (pitch at +/-90 degrees): only roll -/+ yaw is observable.
+        # Put it all in yaw, with roll zero, so the rotation round-trips exactly.
+        pitch = -math.copysign(math.pi / 2, float(r[2, 0]))
+        yaw = math.atan2(-float(r[0, 1]), float(r[1, 1]))
+        return np.asarray((0.0, pitch, yaw), dtype=np.float64)
     pitch = -math.asin(max(-1.0, min(1.0, float(r[2, 0]))))
     roll = math.atan2(float(r[2, 1]), float(r[2, 2]))
     yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
