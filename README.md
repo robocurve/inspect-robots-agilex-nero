@@ -96,11 +96,31 @@ fingers forward, because the Nero's wrist bends only about 45 degrees.
 - `closed_angles`: how far each motor may close, if the full range is too much.
 - `camera_device`: the station camera.
 
+## First run on a real Nero
+
+Nothing here has run on the physical arm yet. Please go step by step and send
+us the output of each step.
+
+1. Bring up CAN and set `firmware` to the arm's profile. Measure and set
+   `tcp_offset` (flange to the point you want to steer, through the mount),
+   then `home_pos` and the workspace box for the table.
+2. **Arm only, slowly:** `-E hand=none -E speed_percent=10`, home well above
+   the table, `unattended` off so the operator prompts appear. Reset glides
+   the hand home in 2 cm steps; check it goes where you expect.
+3. **Then the hand:** set `hand_port` and `hand_id`, keep `hand_force_value`
+   low at first, and check each finger's direction (swap `open_angles` and
+   `closed_angles` entries if one runs backwards).
+
+Stopping: Ctrl-C leaves the arm holding its last target. To lower it, use the
+arm's electronic e-stop (`emergency_stop()`), which descends slowly. Never
+call pyAgxArm `disable()` or `reset()` with the arm raised: they drop it.
+
 ## Run
 
 ```bash
+git clone https://github.com/robocurve/inspect-robots-agilex-nero && cd inspect-robots-agilex-nero
 uv venv && source .venv/bin/activate
-uv pip install -e ".[hardware]"
+uv pip install inspect-robots inspect-robots-agent -e ".[hardware]"
 pip install "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm"
 sudo ip link set can0 up type can bitrate 1000000
 
